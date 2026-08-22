@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "百度网盘分享直下",
+  "productName": "BaiduPCS-ShareDirect",
   "version": "1.0.0",
   "identifier": "com.baidupcs.share-client",
   "build": {
