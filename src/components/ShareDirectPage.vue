@@ -12,6 +12,26 @@
 
     <!-- Step 1 -->
     <div v-if="step === 1" class="step-panel">
+      <!-- 智能粘贴识别区 -->
+      <el-card shadow="never" class="paste-card" style="margin-bottom: 20px">
+        <template #header>
+          <span>智能粘贴识别区</span>
+        </template>
+        <el-input
+          v-model="pasteText"
+          type="textarea"
+          :rows="4"
+          placeholder="在此处粘贴完整的百度网盘分享文案，例如：
+【超级会员V8】通过百度网盘分享的文件…
+链接:https://pan.baidu.com/s/1xxxxx?pwd=abcd
+复制这段内容打开「百度网盘APP 即可获取」"
+          @input="handleSmartPaste"
+        />
+        <div class="form-tip" style="margin-top: 8px">
+          支持自动识别链接和提取码，粘贴后自动填充下方表单
+        </div>
+      </el-card>
+
       <el-form :model="form" label-width="100px" style="max-width: 600px;">
         <el-form-item label="分享链接" required>
           <el-input
@@ -101,7 +121,14 @@
 import { ref, reactive, onMounted } from 'vue'
 import { Link, Lock, Folder, View, Download, Back } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { shareApi, type ShareFile, type ShareInfo, type PreviewResponse, type TransferResponse } from '../api/share'
+import { invoke } from '@tauri-apps/api/core'
+import {
+  shareApi,
+  type ShareFile,
+  type ShareInfo,
+  type PreviewResponse,
+  type TransferResponse
+} from '../api/share'
 import { useSettingsStore } from '../stores/settings'
 import ShareFileSelector from './ShareFileSelector.vue'
 
@@ -115,6 +142,7 @@ const currentPath = ref('/')
 const selectedFiles = ref<ShareFile[]>([])
 const shareInfo = ref<ShareInfo | null>(null)
 const result = ref<{ success: boolean; message: string } | null>(null)
+const pasteText = ref('')
 
 const form = reactive({
   link: '',
@@ -124,9 +152,28 @@ const form = reactive({
 })
 
 onMounted(() => {
-  // 从设置中读取默认下载路径
   form.savePath = settingsStore.config.defaultDownloadPath || './downloads'
 })
+
+const handleSmartPaste = () => {
+  const text = pasteText.value
+  if (!text) return
+
+  const linkMatches = text.match(/https?:\/\/pan\.baidu\.com\/[^\s"<>]+/gi)
+  if (linkMatches && linkMatches.length > 0) {
+    const linkWithPwd = linkMatches.find(
+      (l) => l.includes('?pwd=') || l.includes('&pwd=')
+    )
+    form.link = linkWithPwd || linkMatches[0]
+    extractPwdFromUrl()
+  }
+
+  const pwdMatches = text.match(/(?:提取码|密码|pwd)[\s:：]+([a-zA-Z0-9]{4})/i)
+  if (pwdMatches && pwdMatches[1] && !form.pwd) {
+    form.pwd = pwdMatches[1]
+    ElMessage.success(`已从文案中提取验证码: ${pwdMatches[1]}`)
+  }
+}
 
 const extractPwdFromUrl = () => {
   const match = form.link.match(/[?&]pwd=([a-zA-Z0-9]{4})/i)
@@ -137,15 +184,39 @@ const extractPwdFromUrl = () => {
 }
 
 const saveDefaultPath = () => {
-  if (!form.savePath) { ElMessage.warning('请输入路径'); return }
+  if (!form.savePath) {
+    ElMessage.warning('请输入路径')
+    return
+  }
   settingsStore.config.defaultDownloadPath = form.savePath
   settingsStore.save()
   ElMessage.success('默认下载路径已保存')
 }
 
+const ensureSavePath = async () => {
+  if (settingsStore.config.askEveryTime) {
+    try {
+      const selected = (await invoke('select_folder')) as string
+      if (selected) {
+        form.savePath = selected
+      } else {
+        throw new Error('未选择保存目录')
+      }
+    } catch (e: any) {
+      throw new Error('选择保存目录失败: ' + (e.message || '用户取消'))
+    }
+  }
+}
+
 const handlePreview = async () => {
-  if (!form.link) { ElMessage.warning('请输入分享链接'); return }
-  if (!form.savePath) { ElMessage.warning('请输入下载路径'); return }
+  if (!form.link) {
+    ElMessage.warning('请输入分享链接')
+    return
+  }
+  if (!form.savePath) {
+    ElMessage.warning('请输入下载路径')
+    return
+  }
   loading.value = true
   try {
     const data: PreviewResponse = await shareApi.preview({
@@ -186,9 +257,13 @@ const enterFolder = async (folder: any) => {
 }
 
 const handleDownloadAll = async () => {
-  if (!form.link || !form.savePath) { ElMessage.warning('请填写完整信息'); return }
+  if (!form.link || !form.savePath) {
+    ElMessage.warning('请填写完整信息')
+    return
+  }
   loading.value = true
   try {
+    await ensureSavePath()
     const data: TransferResponse = await shareApi.createTransfer({
       share_url: form.link,
       password: form.pwd || undefined,
@@ -201,7 +276,9 @@ const handleDownloadAll = async () => {
     })
     result.value = {
       success: true,
-      message: `任务ID: ${data.task_id}。${form.autoDelete ? '下载完成后将自动清理网盘转存文件。' : ''}`
+      message: `任务ID: ${data.task_id}。${
+        form.autoDelete ? '下载完成后将自动清理网盘转存文件。' : ''
+      }`
     }
     step.value = 3
     ElMessage.success('已开始下载全部文件')
@@ -214,9 +291,13 @@ const handleDownloadAll = async () => {
 }
 
 const handleStartDownload = async () => {
-  if (selectedFiles.value.length === 0) { ElMessage.warning('请至少选择一个文件'); return }
+  if (selectedFiles.value.length === 0) {
+    ElMessage.warning('请至少选择一个文件')
+    return
+  }
   loading.value = true
   try {
+    await ensureSavePath()
     const data: TransferResponse = await shareApi.createTransfer({
       share_url: form.link,
       password: form.pwd || undefined,
@@ -225,12 +306,14 @@ const handleStartDownload = async () => {
       auto_download: true,
       local_download_path: form.savePath,
       is_share_direct_download: true,
-      selected_fs_ids: selectedFiles.value.map(f => f.fs_id),
+      selected_fs_ids: selectedFiles.value.map((f) => f.fs_id),
       auto_delete: form.autoDelete
     })
     result.value = {
       success: true,
-      message: `任务ID: ${data.task_id}。已选择 ${selectedFiles.value.length} 个文件。${form.autoDelete ? '下载完成后将自动清理网盘转存文件。' : ''}`
+      message: `任务ID: ${data.task_id}。已选择 ${
+        selectedFiles.value.length
+      } 个文件。${form.autoDelete ? '下载完成后将自动清理网盘转存文件。' : ''}`
     }
     step.value = 3
     ElMessage.success('下载任务已创建')
@@ -252,18 +335,43 @@ const handleReset = () => {
   form.link = ''
   form.pwd = ''
   form.savePath = settingsStore.config.defaultDownloadPath || './downloads'
+  pasteText.value = ''
 }
 </script>
 
 <style scoped>
-.share-direct-page { padding: 20px; max-width: 900px; margin: 0 auto; }
+.share-direct-page {
+  padding: 20px;
+  max-width: 900px;
+  margin: 0 auto;
+}
 .page-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 24px;
 }
-.page-header h2 { margin: 0; font-size: 20px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
-.step-panel { background: #fff; border-radius: 8px; padding: 24px; }
-.form-tip { font-size: 12px; color: #909399; margin-top: 4px; }
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-panel {
+  background: #fff;
+  border-radius: 8px;
+  padding: 24px;
+}
+.form-tip {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+}
+.paste-card :deep(.el-card__header) {
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 500;
+}
 </style>

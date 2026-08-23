@@ -11,7 +11,8 @@ function getClient() {
 
   client.interceptors.request.use((config) => {
     const token = store.config.token
-    if (token) {
+    const authMode = store.config.authMode
+    if (token && authMode !== 'none') {
       config.headers.Authorization = `Bearer ${token}`
     }
     return config
@@ -22,6 +23,9 @@ function getClient() {
     (error) => {
       if (error.response?.status === 419) {
         return Promise.reject(new Error('认证已过期，请重新登录'))
+      }
+      if (error.response?.status === 401) {
+        return Promise.reject(new Error('认证失败，请检查认证设置'))
       }
       return Promise.reject(error)
     }

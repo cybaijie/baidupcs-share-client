@@ -9,21 +9,26 @@ function getClient() {
     headers: { 'Content-Type': 'application/json' }
   })
 
-  // 请求拦截器：自动添加 Token
   client.interceptors.request.use((config) => {
     const token = store.config.token
-    if (token) {
+    const authMode = store.config.authMode
+    if (token && authMode !== 'none') {
       config.headers.Authorization = `Bearer ${token}`
     }
     return config
   })
 
-  // 响应拦截器：处理 419 认证错误
   client.interceptors.response.use(
     (response) => response,
     (error) => {
       if (error.response?.status === 419) {
         return Promise.reject(new Error('认证已过期，请重新登录'))
+      }
+      if (error.response?.status === 401) {
+        return Promise.reject(new Error('认证失败，请检查认证设置'))
+      }
+      if (error.response?.status === 405) {
+        return Promise.reject(new Error('请求方法不允许 (405)，请检查后端API版本'))
       }
       return Promise.reject(error)
     }

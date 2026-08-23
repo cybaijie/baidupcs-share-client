@@ -9,15 +9,33 @@ export interface AppConfig {
   totpSecret: string
   token: string
   defaultDownloadPath: string
+  savePassword: boolean
+  askEveryTime: boolean
+  maxRetry: number
+  proxyType: 'none' | 'http' | 'socks5'
+  proxyHost: string
+  proxyPort: number
+  proxyUsername: string
+  proxyPassword: string
+  proxyAutoFallback: boolean
 }
 
 const DEFAULTS: AppConfig = {
   serverUrl: 'http://192.168.0.15:18888',
-  authMode: 'password',
+  authMode: 'none',
   password: '',
   totpSecret: '',
   token: '',
   defaultDownloadPath: './downloads',
+  savePassword: false,
+  askEveryTime: false,
+  maxRetry: 3,
+  proxyType: 'none',
+  proxyHost: '',
+  proxyPort: 1080,
+  proxyUsername: '',
+  proxyPassword: '',
+  proxyAutoFallback: true,
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -33,7 +51,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const load = () => {
     const raw = localStorage.getItem('baidupcs_settings')
     if (raw) {
-      try { config.value = { ...DEFAULTS, ...JSON.parse(raw) } } catch {}
+      try { 
+        const parsed = JSON.parse(raw)
+        config.value = { ...DEFAULTS, ...parsed } 
+      } catch {}
     }
     loaded.value = true
     ensureWsConnected()
