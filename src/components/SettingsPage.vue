@@ -402,8 +402,13 @@ const handleLogin = async () => {
     }
     settingsStore.save()
     loginSuccess.value = true
-    loginMsg.value = '登录成功，Token 已保存'
-    ElMessage.success('登录成功')
+    if (result.viaFallback) {
+      loginMsg.value = '未检测到标准登录接口，已使用密码作为 Token 继续（Fallback 模式）'
+      ElMessage.warning(loginMsg.value)
+    } else {
+      loginMsg.value = '登录成功，Token 已保存'
+      ElMessage.success('登录成功')
+    }
   } catch (e: any) {
     loginSuccess.value = false
     loginMsg.value = e.message || '登录失败，请检查密码或 2FA 码'

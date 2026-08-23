@@ -2,6 +2,7 @@ import axios from 'axios'
 
 export interface LoginResult {
   token: string
+  viaFallback?: boolean
 }
 
 function getClient(serverUrl: string) {
@@ -66,11 +67,13 @@ export async function loginWithPassword(serverUrl: string, password: string): Pr
         if (token) return { token }
       }
     } catch (e: any) {
-      const status = e.response?.status
-      if (status === 401 || status === 403 || status === 419) continue
+      // 与 Python 脚本一致：任何异常（405/404/网络错误等）都继续尝试下一个端点
+      continue
     }
   }
-  throw new Error('密码认证失败，请检查密码或后端地址')
+
+  // Fallback：与 Python 脚本一致，未找到标准登录接口时，将密码本身作为 Token
+  return { token: password, viaFallback: true }
 }
 
 export async function loginWith2FA(serverUrl: string, password: string, code: string): Promise<LoginResult> {
@@ -95,10 +98,11 @@ export async function loginWith2FA(serverUrl: string, password: string, code: st
         if (token) return { token }
       }
     } catch (e: any) {
-      const status = e.response?.status
-      if (status === 401 || status === 403 || status === 419) continue
+      continue
     }
   }
+
+  // Fallback：与 Python 脚本一致，降级到仅密码模式
   return loginWithPassword(serverUrl, password)
 }
 
@@ -122,9 +126,10 @@ export async function loginWith2FAOnly(serverUrl: string, code: string): Promise
         if (token) return { token }
       }
     } catch (e: any) {
-      const status = e.response?.status
-      if (status === 401 || status === 403 || status === 419) continue
+      continue
     }
   }
-  throw new Error('2FA认证失败，请检查验证码')
+
+  // Fallback：将 2FA 码本身作为 Token
+  return { token: code, viaFallback: true }
 }
