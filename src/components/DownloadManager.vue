@@ -348,8 +348,8 @@ function formatSpeed(bytes?: number) {
 }
 
 function calcFileProgress(file: FileTask) {
-  const tot = file.total_size ?? 0
-  const dl = file.downloaded_size ?? 0
+  const tot = (file.total_size as number | undefined) ?? 0
+  const dl = (file.downloaded_size as number | undefined) ?? 0
   return tot > 0 ? Math.min(100, (dl / tot) * 100) : 0
 }
 
@@ -414,9 +414,9 @@ const displayCards = computed((): DisplayCard[] => {
   )
   for (const file of fileTasks.value) {
     if (groupedFileIds.has(file.id)) continue
-    const progress = (file.total_size || 0) > 0
-      ? ((file.downloaded_size || 0) / file.total_size) * 100
-      : 0
+    const ftot = file.total_size ?? 0
+    const fdl = file.downloaded_size ?? 0
+    const progress = ftot > 0 ? (fdl / ftot) * 100 : 0
     cards.push({
       id: file.id,
       name: file.name || 'file',
