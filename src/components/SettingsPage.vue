@@ -2,8 +2,14 @@
   <div class="settings-page">
     <h2>系统设置</h2>
 
-    <div class="settings-section">
-      <h3>🔌 服务器连接</h3>
+    <!-- 服务器连接 -->
+    <el-card class="setting-card" shadow="hover">
+      <template #header>
+        <div class="card-header">
+          <el-icon :size="20" color="#409eff"><Connection /></el-icon>
+          <span>服务器连接</span>
+        </div>
+      </template>
       <el-form :model="settings" label-width="140px">
         <el-form-item label="后端地址">
           <el-input
@@ -22,10 +28,16 @@
           </span>
         </el-form-item>
       </el-form>
-    </div>
+    </el-card>
 
-    <div class="settings-section">
-      <h3>💾 下载设置</h3>
+    <!-- 下载设置 -->
+    <el-card class="setting-card" shadow="hover">
+      <template #header>
+        <div class="card-header">
+          <el-icon :size="20" color="#409eff"><Download /></el-icon>
+          <span>下载设置</span>
+        </div>
+      </template>
       <el-form :model="settings" label-width="140px">
         <el-form-item label="默认下载地址">
           <el-input
@@ -33,77 +45,108 @@
             placeholder="./downloads"
             clearable
           />
-          <div class="form-tip">分享直下时自动填充此路径，无需每次手动输入</div>
         </el-form-item>
       </el-form>
-    </div>
+    </el-card>
 
-    <div class="settings-section">
-      <h3>🔐 访问认证</h3>
-      <div class="auth-cards">
-        <div
-          v-for="m in authModes"
-          :key="m.val"
-          class="auth-card"
-          :class="{ active: settings.authMode === m.val }"
-          @click="settings.authMode = m.val as any"
-        >
-          <div class="auth-icon">{{ m.icon }}</div>
-          <div class="auth-name">{{ m.label }}</div>
-          <div class="auth-desc">{{ m.desc }}</div>
+    <!-- Web 访问认证 -->
+    <el-card class="setting-card auth-card" shadow="hover">
+      <template #header>
+        <div class="card-header">
+          <el-icon :size="20" color="#409eff"><Lock /></el-icon>
+          <span>Web 访问认证</span>
         </div>
+      </template>
+
+      <!-- 认证状态 -->
+      <div class="auth-status-bar">
+        <span class="status-label">认证状态</span>
+        <el-tag :type="settings.token ? 'success' : 'info'" size="small">
+          {{ settings.token ? '已登录' : '未登录' }}
+        </el-tag>
+        <span v-if="settings.token" class="token-hint">Token 已保存</span>
       </div>
 
-      <el-form :model="settings" label-width="140px" v-if="settings.authMode !== 'none'">
-        <el-form-item label="访问密码" v-if="usePassword">
-          <el-input v-model="settings.password" type="password" show-password placeholder="设置访问密码" />
-        </el-form-item>
-        <el-form-item label="2FA 密钥" v-if="use2FA">
-          <el-input v-model="settings.totpSecret" placeholder="输入 TOTP 密钥">
-            <template #append><el-button @click="genTOTP">生成</el-button></template>
-          </el-input>
-          <img v-if="qr" :src="qr" class="qr-img" />
-        </el-form-item>
-      </el-form>
-    </div>
+      <el-divider />
 
-    <div class="settings-section">
-      <h3>💾 数据持久化</h3>
-      <el-form label-width="140px">
-        <el-form-item label="Token">
-          <el-input :model-value="settings.token || '未登录'" disabled>
-            <template #append><el-button @click="settings.token = ''">清除</el-button></template>
-          </el-input>
+      <!-- 认证模式 -->
+      <el-form :model="loginForm" label-width="140px">
+        <el-form-item label="认证模式">
+          <el-select v-model="loginForm.mode" style="width: 100%">
+            <el-option label="无认证（直接访问）" value="none" />
+            <el-option label="仅密码认证" value="password" />
+            <el-option label="仅双因素认证 (2FA)" value="2fa" />
+            <el-option label="密码 + 双因素认证" value="password_2fa" />
+          </el-select>
+          <div class="form-tip">选择后端实际启用的认证方式</div>
         </el-form-item>
+
+        <!-- 密码输入 -->
+        <el-form-item label="密码" v-if="loginForm.mode === 'password' || loginForm.mode === 'password_2fa'">
+          <el-input
+            v-model="loginForm.password"
+            type="password"
+            show-password
+            placeholder="输入后端访问密码"
+          />
+        </el-form-item>
+
+        <!-- 2FA 输入 -->
+        <el-form-item label="2FA 验证码" v-if="loginForm.mode === '2fa' || loginForm.mode === 'password_2fa'">
+          <el-input
+            v-model="loginForm.totpCode"
+            placeholder="输入 6 位 TOTP 验证码"
+            maxlength="6"
+          />
+        </el-form-item>
+
         <el-form-item>
-          <el-button type="primary" @click="save">保存设置</el-button>
-          <el-button @click="reset">恢复默认</el-button>
+          <el-button type="primary" :loading="loggingIn" @click="handleLogin">
+            {{ settings.token ? '重新登录' : '登录' }}
+          </el-button>
+          <el-button v-if="settings.token" @click="handleLogout">退出登录</el-button>
         </el-form-item>
       </el-form>
+
+      <el-alert
+        v-if="loginMsg"
+        :type="loginSuccess ? 'success' : 'error'"
+        :title="loginMsg"
+        show-icon
+        :closable="false"
+        style="margin-top: 12px"
+      />
+    </el-card>
+
+    <!-- 保存按钮 -->
+    <div class="save-bar">
+      <el-button type="primary" size="large" @click="save">保存设置</el-button>
+      <el-button size="large" @click="reset">恢复默认</el-button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Connection, Download, Lock } from '@element-plus/icons-vue'
 import { useSettingsStore } from '../stores/settings'
+import { loginWithPassword, loginWith2FA } from '../api/auth'
 
 const settingsStore = useSettingsStore()
 const settings = computed(() => settingsStore.config)
+
 const testing = ref(false)
 const connStatus = ref<'unknown' | 'online' | 'offline'>('unknown')
-const qr = ref('')
+const loggingIn = ref(false)
+const loginMsg = ref('')
+const loginSuccess = ref(false)
 
-const authModes = [
-  { val: 'none', label: '无认证', desc: '直接访问', icon: '🔓' },
-  { val: 'password', label: '仅密码', desc: '密码保护', icon: '🔑' },
-  { val: '2fa', label: '仅2FA', desc: 'TOTP认证', icon: '📱' },
-  { val: 'password_2fa', label: '密码+2FA', desc: '双重安全', icon: '🛡️' },
-]
-
-const usePassword = computed(() => ['password', 'password_2fa'].includes(settings.value.authMode))
-const use2FA = computed(() => ['2fa', 'password_2fa'].includes(settings.value.authMode))
+const loginForm = reactive({
+  mode: 'password' as 'none' | 'password' | '2fa' | 'password_2fa',
+  password: '',
+  totpCode: '',
+})
 
 const connText = computed(() => ({ online: '连接正常', offline: '连接失败', unknown: '未测试' }[connStatus.value]))
 
@@ -115,37 +158,116 @@ const testConnection = async () => {
   ElMessage[connStatus.value === 'online' ? 'success' : 'error'](connText.value)
 }
 
-const genTOTP = () => {
-  const secret = Math.random().toString(36).substring(2, 18).toUpperCase()
-  settings.value.totpSecret = secret
-  qr.value = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=otpauth://totp/BaiduPCS:${settings.value.serverUrl}?secret=${secret}&issuer=BaiduPCS`
+const handleLogin = async () => {
+  if (loginForm.mode === 'none') {
+    settingsStore.config.token = 'no-auth'
+    settingsStore.save()
+    loginSuccess.value = true
+    loginMsg.value = '已设置为无认证模式'
+    ElMessage.success('已设置为无认证模式')
+    return
+  }
+
+  if ((loginForm.mode === 'password' || loginForm.mode === 'password_2fa') && !loginForm.password) {
+    loginSuccess.value = false
+    loginMsg.value = '请输入密码'
+    return
+  }
+  if ((loginForm.mode === '2fa' || loginForm.mode === 'password_2fa') && !loginForm.totpCode) {
+    loginSuccess.value = false
+    loginMsg.value = '请输入 2FA 验证码'
+    return
+  }
+
+  loggingIn.value = true
+  loginMsg.value = ''
+  try {
+    let result
+    if (loginForm.mode === 'password') {
+      result = await loginWithPassword(loginForm.password)
+    } else if (loginForm.mode === '2fa') {
+      result = await loginWith2FA('', loginForm.totpCode)
+    } else {
+      result = await loginWith2FA(loginForm.password, loginForm.totpCode)
+    }
+    settingsStore.config.token = result.token
+    settingsStore.save()
+    loginSuccess.value = true
+    loginMsg.value = '登录成功，Token 已保存'
+    ElMessage.success('登录成功')
+  } catch (e: any) {
+    loginSuccess.value = false
+    loginMsg.value = e.message || '登录失败，请检查密码或 2FA 码'
+    ElMessage.error(loginMsg.value)
+  } finally {
+    loggingIn.value = false
+  }
 }
 
-const save = () => { settingsStore.save(); ElMessage.success('设置已保存') }
-const reset = () => { settingsStore.reset(); qr.value = ''; ElMessage.info('已恢复默认') }
+const handleLogout = () => {
+  settingsStore.config.token = ''
+  settingsStore.save()
+  loginMsg.value = ''
+  ElMessage.success('已退出登录')
+}
+
+const save = () => {
+  settingsStore.save()
+  ElMessage.success('设置已保存')
+}
+
+const reset = () => {
+  settingsStore.reset()
+  loginForm.mode = 'password'
+  loginForm.password = ''
+  loginForm.totpCode = ''
+  loginMsg.value = ''
+  ElMessage.info('已恢复默认')
+}
 </script>
 
 <style scoped>
 .settings-page { padding: 20px; max-width: 700px; margin: 0 auto; }
-.settings-page h2 { font-size: 20px; font-weight: 500; margin-bottom: 24px; }
-.settings-section { margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid #e4e7ed; }
-.settings-section:last-child { border-bottom: none; }
-.settings-section h3 { font-size: 16px; font-weight: 500; margin-bottom: 16px; color: #303133; }
+.settings-page h2 { font-size: 20px; font-weight: 500; margin-bottom: 20px; }
 
-.auth-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
-.auth-card { border: 2px solid #e4e7ed; border-radius: 8px; padding: 16px; cursor: pointer; text-align: center; background: #fff; transition: all .2s; }
-.auth-card:hover { border-color: #c0c4cc; }
-.auth-card.active { border-color: #409eff; background: #ecf5ff; }
-.auth-icon { font-size: 24px; margin-bottom: 6px; }
-.auth-name { font-size: 14px; font-weight: 500; color: #303133; }
-.auth-desc { font-size: 12px; color: #909399; margin-top: 4px; }
+.setting-card { margin-bottom: 16px; }
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 500;
+}
 
-.conn-status { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; font-size: 13px; }
+.auth-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+.status-label { font-size: 14px; color: #606266; }
+.token-hint { font-size: 12px; color: #909399; margin-left: 8px; }
+
+.form-tip { font-size: 12px; color: #909399; margin-top: 4px; }
+
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 13px;
+}
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.online { background: #67c23a; }
 .dot.offline { background: #f56c6c; }
 .dot.unknown { background: #909399; }
 
-.qr-img { width: 150px; height: 150px; border: 1px solid #e4e7ed; border-radius: 4px; margin-top: 8px; }
-.form-tip { font-size: 12px; color: #909399; margin-top: 4px; }
+.save-bar {
+  margin-top: 24px;
+  display: flex;
+  gap: 12px;
+}
 </style>
