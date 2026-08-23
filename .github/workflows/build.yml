@@ -40,13 +40,16 @@ jobs:
         run: npm install
 
       - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: 'BaiduPCS-ShareDirect v__VERSION__'
-          releaseBody: 'See the assets to download this version.'
-          releaseDraft: true
-          prerelease: false
-          args: '--target x86_64-pc-windows-msvc'
+          name: BaiduPCS-ShareDirect-setup
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaiduPCS-ShareDirect-msi
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
