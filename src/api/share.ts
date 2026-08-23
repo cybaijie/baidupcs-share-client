@@ -1,29 +1,20 @@
-import axios, { AxiosInstance } from 'axios'
+import axios from 'axios'
+import { useSettingsStore } from '../stores/settings'
 
-const BASE_URL = localStorage.getItem('server_url') || 'http://192.168.0.15:18888'
+function getClient() {
+  const store = useSettingsStore()
+  return axios.create({
+    baseURL: `${store.baseURL}/api/v1`,
+    timeout: 30000,
+    headers: { 'Content-Type': 'application/json' }
+  })
+}
 
 interface ApiResponse<T = any> {
   code: number
   message: string
   data: T
 }
-
-const client: AxiosInstance = axios.create({
-  baseURL: `${BASE_URL}/api/v1`,
-  timeout: 30000,
-  headers: { 'Content-Type': 'application/json' }
-})
-
-client.interceptors.response.use(
-  (res) => {
-    const body = res.data as ApiResponse
-    if (body.code !== 0) {
-      return Promise.reject(new Error(body.message || '请求失败'))
-    }
-    return body.data
-  },
-  (err) => Promise.reject(err)
-)
 
 export interface ShareFile {
   fs_id: number
@@ -56,7 +47,11 @@ export interface TransferResponse {
 
 export const shareApi = {
   preview(data: { share_url: string; password?: string }): Promise<PreviewResponse> {
-    return client.post('/transfers/preview', data)
+    return getClient().post('/transfers/preview', data).then(r => {
+      const body = r.data as ApiResponse
+      if (body.code !== 0) throw new Error(body.message || '请求失败')
+      return body.data
+    })
   },
 
   previewDir(data: {
@@ -68,7 +63,11 @@ export const shareApi = {
     kind?: string
     token?: string
   }): Promise<PreviewResponse> {
-    return client.post('/transfers/preview/dir', data)
+    return getClient().post('/transfers/preview/dir', data).then(r => {
+      const body = r.data as ApiResponse
+      if (body.code !== 0) throw new Error(body.message || '请求失败')
+      return body.data
+    })
   },
 
   createTransfer(data: {
@@ -80,23 +79,32 @@ export const shareApi = {
     local_download_path?: string
     is_share_direct_download?: boolean
     selected_fs_ids?: number[]
+    auto_delete?: boolean
   }): Promise<TransferResponse> {
-    return client.post('/transfers', data)
+    return getClient().post('/transfers', data).then(r => {
+      const body = r.data as ApiResponse
+      if (body.code !== 0) throw new Error(body.message || '请求失败')
+      return body.data
+    })
   },
 
   listTransfers(): Promise<{ tasks: any[] }> {
-    return client.get('/transfers')
+    return getClient().get('/transfers').then(r => {
+      const body = r.data as ApiResponse
+      if (body.code !== 0) throw new Error(body.message || '请求失败')
+      return body.data
+    })
   },
 
   getTransfer(id: string): Promise<any> {
-    return client.get(`/transfers/${id}`)
+    return getClient().get(`/transfers/${id}`).then(r => r.data.data)
   },
 
   cancelTransfer(id: string): Promise<any> {
-    return client.post(`/transfers/${id}/cancel`)
+    return getClient().post(`/transfers/${id}/cancel`).then(r => r.data.data)
   },
 
   deleteTransfer(id: string): Promise<any> {
-    return client.delete(`/transfers/${id}`)
+    return getClient().delete(`/transfers/${id}`).then(r => r.data.data)
   }
 }

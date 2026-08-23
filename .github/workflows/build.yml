@@ -3,30 +3,50 @@ name: Build Windows EXE
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: x86_64-pc-windows-msvc
 
-      - name: Install frontend dependencies
+      - name: Generate icons
+        shell: pwsh
+        run: |
+          if (Test-Path "src-tauri/icons/source.png") {
+            choco install imagemagick -y
+            $env:Path += ";C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"
+            magick src-tauri/icons/source.png -resize 32x32 src-tauri/icons/32x32.png
+            magick src-tauri/icons/source.png -resize 128x128 src-tauri/icons/128x128.png
+            magick src-tauri/icons/source.png -resize 256x256 src-tauri/icons/128x128@2x.png
+            magick src-tauri/icons/source.png -define icon:auto-resize=32,128,256 src-tauri/icons/icon.ico
+          }
+
+      - name: Install dependencies
         run: npm install
 
       - name: Build Tauri App
-        run: npm run tauri:build
-
-      - name: Upload Windows Installer
-        uses: actions/upload-artifact@v4
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: windows-installer
-          path: src-tauri/target/release/bundle/
+          tagName: v__VERSION__
+          releaseName: 'BaiduPCS-ShareDirect v__VERSION__'
+          releaseBody: 'See the assets to download this version.'
+          releaseDraft: true
+          prerelease: false
+          args: '--target x86_64-pc-windows-msvc'

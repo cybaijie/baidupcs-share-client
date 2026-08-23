@@ -13,15 +13,16 @@
     "windows": [
       {
         "title": "百度网盘分享直下",
-        "width": 620,
-        "height": 520,
-        "resizable": false,
+        "width": 1100,
+        "height": 750,
+        "resizable": true,
         "center": true,
         "decorations": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": ["default"]
     }
   },
   "bundle": {

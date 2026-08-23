@@ -67,6 +67,13 @@
         </div>
       </div>
     </el-scrollbar>
+
+    <div class="selector-footer">
+      <el-button @click="emit('back')">返回</el-button>
+      <el-button type="primary" :loading="props.loading" @click="emit('confirm')">
+        开始下载
+      </el-button>
+    </div>
   </div>
 </template>
 
@@ -79,12 +86,14 @@ const props = defineProps<{
   files: ShareFile[]
   currentPath: string
   shareInfo: ShareInfo | null
+  loading?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'back'): void
   (e: 'enterFolder', folder: any): void
   (e: 'selectionChange', files: ShareFile[]): void
+  (e: 'confirm'): void
 }>()
 
 const isAllSelected = ref(false)
@@ -152,4 +161,5 @@ const formatSize = (bytes: number) => {
 .file-enter { cursor: pointer; color: #909399; padding: 4px; margin-right: 8px; }
 .file-enter:hover { color: #409eff; }
 .file-size { font-size: 13px; color: #909399; min-width: 80px; text-align: right; }
+.selector-footer { margin-top: 16px; display: flex; justify-content: flex-end; gap: 8px; }
 </style>
