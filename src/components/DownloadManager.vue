@@ -1,13 +1,16 @@
 <template>
-  <div class="downloads-page">
-    <div class="page-header">
+  <div class="downloads-container">
+    <!-- Toolbar -->
+    <div class="toolbar">
       <div class="header-left">
         <h2>下载管理</h2>
-        <el-tag type="info" size="large">{{ activeCount }} 个任务进行中</el-tag>
+        <el-tag :type="activeCount > 0 ? 'success' : 'info'" size="large">
+          {{ activeCount }} 个任务进行中
+        </el-tag>
       </div>
       <div class="header-right">
         <div class="sort-control">
-          <el-select v-model="sortBy" style="width: 120px">
+          <el-select v-model="sortBy" class="sort-select" style="width: 120px">
             <el-option label="创建时间" value="created_at" />
             <el-option label="名称" value="name" />
             <el-option label="大小" value="size" />
@@ -15,9 +18,9 @@
             <el-option label="状态" value="status" />
             <el-option label="速度" value="speed" />
           </el-select>
-          <el-button @click="sortDesc = !sortDesc">
+          <el-button @click="sortDesc = !sortDesc" :title="sortDesc ? '降序' : '升序'">
             <el-icon><Sort /></el-icon>
-            {{ sortDesc ? '降序' : '升序' }}
+            <span>{{ sortDesc ? '降序' : '升序' }}</span>
           </el-button>
         </div>
         <el-button @click="refreshTasks">
@@ -42,6 +45,7 @@
       </div>
     </div>
 
+    <!-- Status Filter -->
     <div class="status-filter-bar">
       <el-radio-group v-model="statusFilter">
         <el-radio-button label="all">
@@ -62,178 +66,555 @@
       </el-radio-group>
     </div>
 
-    <div class="task-list">
-      <template v-if="displayTasks.length > 0">
-        <div v-for="task in displayTasks" :key="task.id" class="task-card">
-          <div class="task-header">
-            <div class="task-title">
-              <el-icon :size="18" :color="task.is_dir ? '#e6a23c' : '#409eff'">
-                <Folder v-if="task.is_dir" />
-                <Document v-else />
-              </el-icon>
-              <span class="task-name">{{ task.name }}</span>
+    <!-- Task List -->
+    <div class="task-container">
+      <div v-if="displayCards.length > 0" class="task-list">
+        <div
+          v-for="card in displayCards"
+          :key="card.id"
+          class="el-card is-hover-shadow task-card"
+          :class="{ 'is-folder': card.isFolder, 'task-active': card.status === 'active' }"
+          :data-task-id="card.id"
+        >
+          <div class="el-card__body">
+            <!-- Header -->
+            <div class="task-header">
+              <div class="task-info">
+                <div class="task-title">
+                  <el-icon class="file-icon" :size="20">
+                    <Folder v-if="card.isFolder" />
+                    <Document v-else />
+                  </el-icon>
+                  <span class="filename">{{ card.name }}</span>
+                  <el-tag :type="statusTagType(card.status)" size="small">
+                    {{ statusText(card.status) }}
+                  </el-tag>
+                </div>
+                <div class="task-path">{{ card.path }}</div>
+              </div>
+              <div class="task-actions">
+                <el-button size="small" plain type="info" @click="showDetail(card)">
+                  <el-icon><Document /></el-icon> 详情
+                </el-button>
+                <template v-if="card.status === 'active'">
+                  <el-button size="small" @click="handlePause(card)">
+                    <el-icon><VideoPause /></el-icon> 暂停
+                  </el-button>
+                </template>
+                <template v-else-if="card.status === 'waiting' || card.status === 'failed'">
+                  <el-button size="small" type="primary" @click="handleResume(card)">
+                    <el-icon><VideoPlay /></el-icon> 继续
+                  </el-button>
+                </template>
+                <template v-else-if="card.status === 'completed'">
+                  <el-button size="small" type="success" @click="handleOpenFolder(card)">
+                    <el-icon><FolderOpened /></el-icon> 打开文件夹
+                  </el-button>
+                </template>
+                <el-button size="small" type="danger" @click="handleDelete(card)">
+                  <el-icon><Delete /></el-icon> 删除
+                </el-button>
+              </div>
             </div>
-            <el-tag :type="statusTagType(task.status)" size="small">
-              {{ statusText(task.status) }}
-            </el-tag>
-          </div>
-          <div class="task-meta">
-            <span>{{ formatSize(task.size) }}</span>
-            <span>创建于 {{ task.created_at }}</span>
-            <span v-if="task.save_path">保存到: {{ task.save_path }}</span>
-          </div>
-          <div class="task-progress-row">
-            <el-progress
-              :percentage="clampProgress(task.progress)"
-              :status="task.status === 'failed' ? 'exception' : task.progress >= 100 ? 'success' : ''"
-              :stroke-width="8"
-              style="flex: 1"
-            />
-            <span v-if="task.status === 'active'" class="task-speed">{{ task.speed }}/s</span>
-          </div>
-          <div class="task-actions">
-            <el-button v-if="task.status === 'active'" size="small" @click="pauseTask(task.id)">
-              <el-icon><VideoPause /></el-icon>暂停
-            </el-button>
-            <el-button
-              v-if="task.status === 'waiting' || task.status === 'failed'"
-              size="small"
-              type="primary"
-              @click="resumeTask(task.id)"
-            >
-              <el-icon><VideoPlay /></el-icon>继续
-            </el-button>
-            <el-button size="small" type="danger" plain @click="deleteTask(task.id)">
-              <el-icon><Delete /></el-icon>删除
-            </el-button>
+
+            <!-- Progress -->
+            <div class="task-progress">
+              <el-progress
+                :percentage="Math.min(100, Math.max(0, card.progress))"
+                :status="card.status === 'failed' ? 'exception' : card.progress >= 100 ? 'success' : ''"
+                :stroke-width="8"
+              >
+                <template #default>
+                  <span class="progress-text">{{ card.progress.toFixed(1) }}%</span>
+                </template>
+              </el-progress>
+            </div>
+
+            <!-- Stats -->
+            <div class="task-stats">
+              <div class="stat-item">
+                <span class="stat-label">进度:</span>
+                <span class="stat-value">{{ card.doneCount }}/{{ card.totalCount }} 个文件</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">已下载:</span>
+                <span class="stat-value">{{ formatSize(card.downloadedSize) }}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">总大小:</span>
+                <span class="stat-value">{{ formatSize(card.totalSize) }}</span>
+              </div>
+              <div v-if="card.status === 'active'" class="stat-item">
+                <span class="stat-label">速度:</span>
+                <span class="stat-value speed">{{ formatSpeed(card.speed) }}</span>
+              </div>
+            </div>
           </div>
         </div>
-      </template>
+      </div>
       <el-empty v-else description="暂无下载任务" />
     </div>
+
+    <!-- Folder Detail Dialog -->
+    <el-dialog
+      v-model="detailVisible"
+      :title="`文件夹详情: ${detailFolder?.name || ''}`"
+      width="900px"
+      align-center
+    >
+      <div v-if="detailFolder" class="folder-detail">
+        <div class="folder-stats">
+          <div class="stat-card">
+            <div class="stat-label">总文件数</div>
+            <div class="stat-value">{{ detailFolder.totalCount }}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">已完成</div>
+            <div class="stat-value success">{{ detailFolder.doneCount }}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">下载中</div>
+            <div class="stat-value primary">
+              {{ detailFiles.filter(f => ['downloading','running'].includes(f.status)).length }}
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">待处理</div>
+            <div class="stat-value info">
+              {{ detailFiles.filter(f => ['paused','stopped','waiting','pending'].includes(f.status)).length }}
+            </div>
+          </div>
+        </div>
+
+        <div class="subtasks-container">
+          <div class="subtasks-header">
+            <span>子任务列表 ({{ detailFiles.length }} 个)</span>
+            <el-input
+              v-model="detailSearch"
+              placeholder="搜索文件名"
+              size="small"
+              style="width: 250px"
+              :prefix-icon="Search"
+            />
+          </div>
+          <el-table
+            :data="filteredDetailFiles"
+            height="450"
+            stripe
+            style="width: 100%"
+          >
+            <el-table-column prop="name" label="文件名" min-width="200">
+              <template #default="{ row }">
+                <div class="file-name-cell">
+                  <el-icon :size="16"><Document /></el-icon>
+                  <span>{{ row.name }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="status" label="状态" width="100" sortable>
+              <template #default="{ row }">
+                <el-tag :type="fileStatusTagType(row.status)" size="small">
+                  {{ fileStatusText(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="total_size" label="大小" width="120" sortable>
+              <template #default="{ row }">
+                {{ formatSize(row.total_size) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="进度" width="180">
+              <template #default="{ row }">
+                <el-progress
+                  :percentage="calcFileProgress(row)"
+                  :stroke-width="6"
+                >
+                  <template #default>
+                    <span style="font-size: 12px">{{ calcFileProgress(row).toFixed(1) }}%</span>
+                  </template>
+                </el-progress>
+              </template>
+            </el-table-column>
+            <el-table-column label="速度" width="120">
+              <template #default="{ row }">
+                <span v-if="['downloading','running'].includes(row.status)" class="speed-text">
+                  {{ formatSpeed(row.speed) }}
+                </span>
+                <span v-else class="placeholder-text">-</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="detailVisible = false">关闭</el-button>
+        <el-button type="primary" @click="refreshTasks">
+          <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Sort, Refresh, Link, ArrowDown,
   VideoPause, VideoPlay, Delete,
-  Folder, Document
+  Folder, Document, FolderOpened, Search
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { downloadApi, type DownloadTask } from '../api/downloads'
+import { open } from '@tauri-apps/plugin-shell'
+import { downloadApi, type FolderTask, type FileTask, type TransferTask } from '../api/downloads'
 
 defineEmits<{ (e: 'go-share-direct'): void }>()
 
-const tasks = ref<DownloadTask[]>([])
+// ==================== Data ====================
+const folderTasks = ref<FolderTask[]>([])
+const fileTasks = ref<FileTask[]>([])
+const transferTasks = ref<TransferTask[]>([])
 const sortBy = ref('created_at')
 const sortDesc = ref(true)
 const statusFilter = ref('all')
+const loading = ref(false)
 let pollTimer: number | null = null
 
-const activeCount = computed(() => tasks.value.filter(t => t.status === 'active').length)
+// Detail dialog
+const detailVisible = ref(false)
+const detailFolder = ref<DisplayCard | null>(null)
+const detailSearch = ref('')
 
-const displayTasks = computed(() => {
+// ==================== Types ====================
+type TaskStatus = 'active' | 'waiting' | 'completed' | 'failed'
+
+interface DisplayCard {
+  id: string
+  name: string
+  status: TaskStatus
+  rawStatus: string
+  path: string
+  progress: number
+  downloadedSize: number
+  totalSize: number
+  speed: number
+  doneCount: number
+  totalCount: number
+  isFolder: boolean
+  subFiles: FileTask[]
+  transferId?: string
+  localPath?: string
+  createdAt?: string
+}
+
+// ==================== Helpers ====================
+function mapStatus(raw: string): TaskStatus {
+  const s = raw?.toLowerCase() || ''
+  if (['downloading', 'running', 'active', 'pending'].includes(s)) return 'active'
+  if (['paused', 'stopped', 'waiting'].includes(s)) return 'waiting'
+  if (['completed', 'done', 'finished', 'success'].includes(s)) return 'completed'
+  if (['failed', 'error', 'cancelled'].includes(s)) return 'failed'
+  return 'waiting'
+}
+
+function statusTagType(s: TaskStatus) {
+  return { active: 'warning', waiting: 'info', completed: 'success', failed: 'danger' }[s]
+}
+
+function statusText(s: TaskStatus) {
+  return { active: '下载中', waiting: '已暂停', completed: '已完成', failed: '失败' }[s]
+}
+
+function fileStatusTagType(raw: string) {
+  const s = mapStatus(raw)
+  return statusTagType(s)
+}
+
+function fileStatusText(raw: string) {
+  const s = mapStatus(raw)
+  return statusText(s)
+}
+
+function formatSize(bytes?: number) {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let size = bytes
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++ }
+  return `${size.toFixed(2)} ${units[i]}`
+}
+
+function formatSpeed(bytes?: number) {
+  return formatSize(bytes) + '/s'
+}
+
+function calcFileProgress(file: FileTask) {
+  const tot = file.total_size || 0
+  const dl = file.downloaded_size || 0
+  return tot > 0 ? Math.min(100, (dl / tot) * 100) : 0
+}
+
+function extractTempRoot(path: string): string | null {
+  const m = path.match(/(\/\.bpr_share_temp\/[^/]+)/)
+  return m ? m[1] : null
+}
+
+// ==================== Computed ====================
+const displayCards = computed((): DisplayCard[] => {
+  const cards: DisplayCard[] = []
+
+  // Folder cards
+  for (const folder of folderTasks.value) {
+    const subs = fileTasks.value.filter(f =>
+      f.group_id === folder.id || f.folder_id === folder.id || f.parent_task_id === folder.id
+    )
+    const totalSize = subs.reduce((sum, f) => sum + (f.total_size || 0), 0) || (folder.total_size || 0)
+    const downloadedSize = subs.reduce((sum, f) => sum + (f.downloaded_size || 0), 0) || (folder.downloaded_size || 0)
+    const speed = subs.reduce((sum, f) => sum + (f.speed || 0), 0) || (folder.speed || 0)
+    const doneCount = subs.filter(f => ['completed', 'done', 'finished'].includes(f.status)).length
+    const totalCount = subs.length || (folder.total_files || 0)
+    const progress = totalSize > 0 ? (downloadedSize / totalSize) * 100 : 0
+
+    let effStatus = mapStatus(folder.status)
+    if (subs.length > 0) {
+      const allDone = subs.every(f => ['completed', 'done', 'finished'].includes(f.status))
+      const anyActive = subs.some(f => ['downloading', 'running'].includes(f.status))
+      if (allDone) effStatus = 'completed'
+      else if (anyActive) effStatus = 'active'
+    }
+
+    const transfer = transferTasks.value.find(t => {
+      if (folder.transfer_id) return t.id === folder.transfer_id
+      if (folder.source_id) return t.id === folder.source_id
+      return false
+    })
+
+    cards.push({
+      id: folder.id,
+      name: folder.name || 'folder',
+      status: effStatus,
+      rawStatus: folder.status,
+      path: folder.path || '',
+      progress,
+      downloadedSize,
+      totalSize,
+      speed,
+      doneCount,
+      totalCount,
+      isFolder: true,
+      subFiles: subs,
+      transferId: transfer?.id,
+      localPath: folder.save_path || folder.path,
+      createdAt: folder.created_at,
+    })
+  }
+
+  // Standalone file cards
+  const groupedFileIds = new Set(
+    fileTasks.value.filter(f => f.group_id || f.folder_id).map(f => f.id)
+  )
+  for (const file of fileTasks.value) {
+    if (groupedFileIds.has(file.id)) continue
+    const progress = (file.total_size || 0) > 0
+      ? ((file.downloaded_size || 0) / file.total_size) * 100
+      : 0
+    cards.push({
+      id: file.id,
+      name: file.name || 'file',
+      status: mapStatus(file.status),
+      rawStatus: file.status,
+      path: file.path || '',
+      progress,
+      downloadedSize: file.downloaded_size || 0,
+      totalSize: file.total_size || 0,
+      speed: file.speed || 0,
+      doneCount: ['completed', 'done', 'finished'].includes(file.status) ? 1 : 0,
+      totalCount: 1,
+      isFolder: false,
+      subFiles: [],
+      localPath: file.local_path || file.save_path,
+      createdAt: file.created_at,
+    })
+  }
+
+  // Filter
   let list = statusFilter.value === 'all'
-    ? tasks.value
-    : tasks.value.filter(t => t.status === statusFilter.value)
+    ? cards
+    : cards.filter(c => c.status === statusFilter.value)
+
+  // Sort
   list = [...list].sort((a, b) => {
-    let av: any = a[sortBy.value as keyof DownloadTask]
-    let bv: any = b[sortBy.value as keyof DownloadTask]
-    if (sortBy.value === 'size') { av = a.size; bv = b.size }
-    if (sortBy.value === 'progress') { av = a.progress; bv = b.progress }
+    let av: any, bv: any
+    switch (sortBy.value) {
+      case 'name': av = a.name; bv = b.name; break
+      case 'size': av = a.totalSize; bv = b.totalSize; break
+      case 'progress': av = a.progress; bv = b.progress; break
+      case 'status': av = a.status; bv = b.status; break
+      case 'speed': av = a.speed; bv = b.speed; break
+      case 'created_at':
+      default: av = a.createdAt || ''; bv = b.createdAt || ''; break
+    }
     if (av < bv) return sortDesc.value ? 1 : -1
     if (av > bv) return sortDesc.value ? -1 : 1
     return 0
   })
+
   return list
 })
 
+const activeCount = computed(() => displayCards.value.filter(c => c.status === 'active').length)
+
 const countByStatus = (status: string) => {
-  if (status === 'all') return tasks.value.length
-  return tasks.value.filter(t => t.status === status).length
+  if (status === 'all') return displayCards.value.length
+  return displayCards.value.filter(c => c.status === status).length
 }
 
-const statusText = (s: string) =>
-  ({ active: '下载中', waiting: '等待中', completed: '已完成', failed: '失败' }[s] || s)
+const detailFiles = computed(() => {
+  if (!detailFolder.value) return []
+  return fileTasks.value.filter(f =>
+    f.group_id === detailFolder.value!.id ||
+    f.folder_id === detailFolder.value!.id ||
+    f.parent_task_id === detailFolder.value!.id
+  )
+})
 
-const statusTagType = (s: string): any =>
-  ({ active: 'primary', waiting: 'info', completed: 'success', failed: 'danger' }[s] || 'info')
+const filteredDetailFiles = computed(() => {
+  if (!detailSearch.value) return detailFiles.value
+  const kw = detailSearch.value.toLowerCase()
+  return detailFiles.value.filter(f => (f.name || '').toLowerCase().includes(kw))
+})
 
-const formatSize = (bytes?: number) => {
-  if (!bytes) return '-'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++ }
-  return bytes.toFixed(2) + ' ' + units[i]
-}
-
-const clampProgress = (p?: number) => Math.min(100, Math.max(0, p || 0))
-
-const fetchTasks = async () => {
-  try {
-    const data = await downloadApi.list()
-    tasks.value = data.tasks || []
-  } catch (e: any) {
-    console.error('获取任务列表失败:', e)
-  }
+// ==================== Actions ====================
+const fetchAll = async () => {
+  loading.value = true
+  const [folders, files, transfers] = await Promise.all([
+    downloadApi.getFolders(),
+    downloadApi.getFiles(),
+    downloadApi.getTransfers(),
+  ])
+  folderTasks.value = folders
+  fileTasks.value = files
+  transferTasks.value = transfers
+  loading.value = false
 }
 
 const refreshTasks = () => {
-  fetchTasks()
+  fetchAll()
   ElMessage.success('任务列表已刷新')
 }
 
-const pauseTask = async (id: string) => {
-  try { await downloadApi.pause(id); ElMessage.success('任务已暂停'); fetchTasks() }
-  catch (e: any) { ElMessage.error(e.message || '操作失败') }
+const handlePause = async (card: DisplayCard) => {
+  if (card.isFolder) {
+    await downloadApi.pauseFolder(card.id)
+    for (const f of card.subFiles) await downloadApi.pauseFile(f.id)
+  } else {
+    await downloadApi.pauseFile(card.id)
+  }
+  ElMessage.success('已暂停')
+  fetchAll()
 }
 
-const resumeTask = async (id: string) => {
-  try { await downloadApi.resume(id); ElMessage.success('任务已开始'); fetchTasks() }
-  catch (e: any) { ElMessage.error(e.message || '操作失败') }
+const handleResume = async (card: DisplayCard) => {
+  if (card.isFolder) {
+    await downloadApi.resumeFolder(card.id)
+    for (const f of card.subFiles) await downloadApi.resumeFile(f.id)
+  } else {
+    await downloadApi.resumeFile(card.id)
+  }
+  ElMessage.success('已开始')
+  fetchAll()
 }
 
-const deleteTask = async (id: string) => {
+const handleDelete = async (card: DisplayCard) => {
   try {
     await ElMessageBox.confirm('确定删除该任务吗？', '提示', { type: 'warning' })
-    await downloadApi.delete(id)
-    tasks.value = tasks.value.filter(t => t.id !== id)
+    if (card.isFolder) {
+      await downloadApi.pauseFolder(card.id)
+      for (const f of card.subFiles) await downloadApi.pauseFile(f.id)
+      await downloadApi.deleteFolder(card.id)
+      for (const f of card.subFiles) await downloadApi.deleteFile(f.id)
+      if (card.transferId) await downloadApi.deleteTransfer(card.transferId)
+      const tempRoot = extractTempRoot(card.path)
+      if (tempRoot) await downloadApi.deleteNetdiskFiles([tempRoot])
+    } else {
+      await downloadApi.pauseFile(card.id)
+      await downloadApi.deleteFile(card.id)
+    }
     ElMessage.success('任务已删除')
-  } catch {}
+    fetchAll()
+  } catch { /* cancel */ }
 }
 
-const batchPause = () => {
-  tasks.value.forEach(t => { if (t.status === 'active') t.status = 'waiting' })
-  ElMessage.success('已暂停所有下载中任务')
+const handleOpenFolder = async (card: DisplayCard) => {
+  const path = card.localPath || card.path
+  if (!path) return
+  try {
+    await open(path)
+  } catch (e: any) {
+    ElMessage.error('无法打开文件夹: ' + (e.message || '未知错误'))
+  }
 }
 
-const batchResume = () => {
-  tasks.value.forEach(t => { if (t.status === 'waiting' || t.status === 'failed') t.status = 'active' })
-  ElMessage.success('已继续所有任务')
+const showDetail = (card: DisplayCard) => {
+  detailFolder.value = card
+  detailVisible.value = true
+}
+
+// Batch
+const batchPause = async () => {
+  for (const card of displayCards.value.filter(c => c.status === 'active')) {
+    await handlePause(card)
+  }
+}
+
+const batchResume = async () => {
+  for (const card of displayCards.value.filter(c => c.status === 'waiting' || c.status === 'failed')) {
+    await handleResume(card)
+  }
 }
 
 const batchDelete = async () => {
   try {
     await ElMessageBox.confirm('确定删除所有任务吗？', '提示', { type: 'warning' })
-    tasks.value = []
+    for (const card of displayCards.value) {
+      if (card.isFolder) {
+        await downloadApi.pauseFolder(card.id)
+        await downloadApi.deleteFolder(card.id)
+        for (const f of card.subFiles) await downloadApi.deleteFile(f.id)
+        if (card.transferId) await downloadApi.deleteTransfer(card.transferId)
+        const tempRoot = extractTempRoot(card.path)
+        if (tempRoot) await downloadApi.deleteNetdiskFiles([tempRoot])
+      } else {
+        await downloadApi.pauseFile(card.id)
+        await downloadApi.deleteFile(card.id)
+      }
+    }
     ElMessage.success('所有任务已删除')
+    fetchAll()
   } catch {}
 }
 
-const clearCompleted = () => {
-  tasks.value = tasks.value.filter(t => t.status !== 'completed')
+const clearCompleted = async () => {
+  for (const card of displayCards.value.filter(c => c.status === 'completed')) {
+    if (card.isFolder) {
+      await downloadApi.deleteFolder(card.id)
+      for (const f of card.subFiles) await downloadApi.deleteFile(f.id)
+      if (card.transferId) await downloadApi.deleteTransfer(card.transferId)
+    } else {
+      await downloadApi.deleteFile(card.id)
+    }
+  }
   ElMessage.success('已清除已完成任务')
+  fetchAll()
 }
 
-onMounted(() => { fetchTasks(); pollTimer = window.setInterval(fetchTasks, 3000) })
+onMounted(() => { fetchAll(); pollTimer = window.setInterval(fetchAll, 3000) })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
 
 <style scoped>
-.downloads-page { padding: 20px; max-width: 1200px; margin: 0 auto; }
-.page-header {
+.downloads-container { padding: 20px; max-width: 1200px; margin: 0 auto; }
+
+.toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -245,34 +626,108 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .header-left h2 { margin: 0; font-size: 20px; font-weight: 500; }
 .header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sort-control { display: flex; align-items: center; gap: 8px; }
+
 .status-filter-bar { margin-bottom: 16px; }
 .status-count { margin-left: 4px; opacity: 0.7; }
 
+.task-container { display: flex; flex-direction: column; gap: 12px; }
 .task-list { display: flex; flex-direction: column; gap: 12px; }
+
 .task-card {
   background: #fff;
   border: 1px solid #e4e7ed;
   border-radius: 8px;
-  padding: 16px;
   transition: box-shadow 0.3s;
 }
 .task-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+.task-card.task-active { border-left: 3px solid #e6a23c; }
+.task-card.is-folder { }
+
 .task-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
+  align-items: flex-start;
+  padding: 16px 16px 8px;
+  gap: 12px;
 }
-.task-title { display: flex; align-items: center; gap: 8px; }
-.task-name { font-size: 14px; font-weight: 500; color: #303133; }
-.task-meta {
+.task-info { flex: 1; min-width: 0; }
+.task-title {
   display: flex;
-  gap: 16px;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.file-icon { color: #409eff; }
+.is-folder .file-icon { color: #e6a23c; }
+.filename {
+  font-size: 15px;
+  font-weight: 500;
+  color: #303133;
+  word-break: break-all;
+}
+.task-path {
   font-size: 12px;
   color: #909399;
-  margin-bottom: 10px;
+  margin-top: 4px;
+  word-break: break-all;
 }
-.task-progress-row { display: flex; align-items: center; gap: 12px; }
-.task-speed { font-size: 12px; color: #409eff; min-width: 80px; text-align: right; }
-.task-actions { margin-top: 10px; display: flex; gap: 8px; }
+.task-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.task-progress { padding: 0 16px 8px; }
+.progress-text { font-size: 14px; font-weight: 500; color: #606266; }
+
+.task-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 0 16px 12px;
+  font-size: 13px;
+}
+.stat-item { display: flex; align-items: center; gap: 4px; }
+.stat-label { color: #909399; }
+.stat-value { color: #606266; font-weight: 500; }
+.stat-value.speed { color: #409eff; }
+
+/* Detail Dialog */
+.folder-detail { }
+.folder-stats {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.stat-card {
+  flex: 1;
+  min-width: 100px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+}
+.stat-card .stat-label { font-size: 12px; color: #909399; margin-bottom: 4px; }
+.stat-card .stat-value { font-size: 20px; font-weight: 600; color: #303133; }
+.stat-card .stat-value.success { color: #67c23a; }
+.stat-card .stat-value.primary { color: #409eff; }
+.stat-card .stat-value.info { color: #909399; }
+
+.subtasks-container { }
+.subtasks-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.file-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.speed-text { color: #409eff; font-weight: 500; }
+.placeholder-text { color: #c0c4cc; }
 </style>

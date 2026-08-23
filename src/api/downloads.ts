@@ -8,7 +8,6 @@ function getClient() {
     timeout: 30000,
     headers: { 'Content-Type': 'application/json' }
   })
-
   client.interceptors.request.use((config) => {
     const token = store.config.token
     const authMode = store.config.authMode
@@ -17,7 +16,6 @@ function getClient() {
     }
     return config
   })
-
   client.interceptors.response.use(
     (response) => response,
     (error) => {
@@ -30,33 +28,215 @@ function getClient() {
       return Promise.reject(error)
     }
   )
-
   return client
 }
 
-export interface DownloadTask {
+// ==================== Types ====================
+
+export interface TransferTask {
   id: string
-  name: string
-  is_dir: boolean
-  size: number
-  progress: number
-  status: 'active' | 'waiting' | 'completed' | 'failed'
-  speed: string
-  created_at: string
+  task_id?: string
+  share_url?: string
+  status: string
   save_path?: string
+  path?: string
+  created_at?: string
 }
 
+export interface FolderTask {
+  id: string
+  folder_id?: string
+  task_id?: string
+  name?: string
+  folder_name?: string
+  status: string
+  path?: string
+  folder_path?: string
+  save_path?: string
+  total_size?: number
+  downloaded_size?: number
+  total_files?: number
+  completed_files?: number
+  speed?: number
+  download_speed?: number
+  sub_tasks?: any[]
+  files?: any[]
+  task_ids?: string[]
+  transfer_id?: string
+  source_id?: string
+  group_id?: string
+  is_folder?: boolean
+  type?: string
+  created_at?: string
+}
+
+export interface FileTask {
+  id: string
+  task_id?: string
+  name?: string
+  filename?: string
+  status: string
+  path?: string
+  local_path?: string
+  save_path?: string
+  total_size?: number
+  size?: number
+  downloaded_size?: number
+  completed_size?: number
+  speed?: number
+  download_speed?: number
+  progress?: number
+  group_id?: string
+  folder_id?: string
+  parent_task_id?: string
+  is_folder?: boolean
+  type?: string
+  created_at?: string
+}
+
+// ==================== API ====================
+
 export const downloadApi = {
-  list() {
-    return getClient().get('/transfers').then(r => r.data.data)
+  // --- List ---
+  async getTransfers(): Promise<TransferTask[]> {
+    try {
+      const r = await getClient().get('/transfers')
+      const data = r.data?.data
+      const list = data?.tasks || data?.list || data || []
+      return list.map((t: any) => ({ ...t, id: String(t.task_id || t.id || '') }))
+    } catch { return [] }
   },
-  pause(id: string) {
-    return getClient().post(`/transfers/${id}/pause`).then(r => r.data.data)
+
+  async getFolders(): Promise<FolderTask[]> {
+    const endpoints = ['/downloads/folders', '/downloads/all', '/folder-downloads', '/folders/downloads']
+    const results: FolderTask[] = []
+    for (const ep of endpoints) {
+      try {
+        const r = await getClient().get(ep)
+        const data = r.data?.data
+        const list = Array.isArray(data) ? data : (data?.folders || data?.tasks || data?.list || [])
+        for (const f of list) {
+          if (ep === '/downloads/all' && f.type !== 'folder' && !f.is_folder) continue
+          results.push({
+            ...f,
+            id: String(f.id || f.folder_id || f.task_id || ''),
+            name: f.name || f.folder_name || 'folder',
+            path: f.path || f.folder_path || f.save_path || '',
+            status: f.status || 'unknown',
+            total_size: f.total_size || f.size || 0,
+            downloaded_size: f.downloaded_size || f.completed_size || 0,
+            speed: f.speed || f.download_speed || 0,
+            total_files: f.total_files || (f.sub_tasks?.length) || (f.files?.length) || 0,
+          })
+        }
+        if (results.length > 0) break
+      } catch { continue }
+    }
+    const map = new Map<string, FolderTask>()
+    for (const f of results) {
+      if (f.id && !map.has(f.id)) map.set(f.id, f)
+    }
+    return Array.from(map.values())
   },
-  resume(id: string) {
-    return getClient().post(`/transfers/${id}/resume`).then(r => r.data.data)
+
+  async getFiles(): Promise<FileTask[]> {
+    const endpoints = ['/downloads', '/downloads/all', '/downloader/tasks', '/download/tasks']
+    const results: FileTask[] = []
+    for (const ep of endpoints) {
+      try {
+        const r = await getClient().get(ep)
+        const data = r.data?.data
+        const list = Array.isArray(data) ? data : (data?.tasks || data?.downloads || data?.list || [])
+        for (const t of list) {
+          if (ep === '/downloads/all' && (t.type === 'folder' || t.is_folder)) continue
+          results.push({
+            ...t,
+            id: String(t.id || t.task_id || ''),
+            name: t.name || t.filename || 'file',
+            status: t.status || 'unknown',
+            total_size: t.total_size || t.size || 0,
+            downloaded_size: t.downloaded_size || t.completed_size || 0,
+            speed: t.speed || t.download_speed || 0,
+          })
+        }
+        if (results.length > 0) break
+      } catch { continue }
+    }
+    const map = new Map<string, FileTask>()
+    for (const f of results) {
+      if (f.id && !map.has(f.id)) map.set(f.id, f)
+    }
+    return Array.from(map.values())
   },
-  delete(id: string) {
-    return getClient().delete(`/transfers/${id}`).then(r => r.data.data)
+
+  // --- Folder Control ---
+  async pauseFolder(id: string): Promise<boolean> {
+    try { await getClient().post(`/downloads/folder/${id}/pause`); return true } catch { return false }
+  },
+  async resumeFolder(id: string): Promise<boolean> {
+    try { await getClient().post(`/downloads/folder/${id}/resume`); return true }
+    catch {
+      try { await getClient().post(`/downloads/folder/${id}/start`); return true } catch { return false }
+    }
+  },
+  async deleteFolder(id: string): Promise<boolean> {
+    const eps = [
+      { m: 'delete' as const, u: `/downloads/folder/${id}?delete_files=true` },
+      { m: 'delete' as const, u: `/downloads/folder/${id}` },
+      { m: 'post' as const, u: `/downloads/folder/${id}/cancel`, d: { delete_files: true } },
+    ]
+    for (const ep of eps) {
+      try {
+        if (ep.m === 'delete') await getClient().delete(ep.u)
+        else await getClient().post(ep.u, ep.d)
+        return true
+      } catch { continue }
+    }
+    return false
+  },
+
+  // --- File Control ---
+  async pauseFile(id: string): Promise<boolean> {
+    try { await getClient().post(`/downloads/${id}/pause`); return true } catch { return false }
+  },
+  async resumeFile(id: string): Promise<boolean> {
+    try { await getClient().post(`/downloads/${id}/resume`); return true }
+    catch {
+      try { await getClient().post(`/downloads/${id}/start`); return true } catch { return false }
+    }
+  },
+  async deleteFile(id: string): Promise<boolean> {
+    const eps = [
+      { m: 'delete' as const, u: `/downloads/${id}?delete_file=true` },
+      { m: 'delete' as const, u: `/downloads/${id}` },
+      { m: 'post' as const, u: '/downloads/batch/delete', d: { task_ids: [id], delete_file: true, delete_files: true } },
+      { m: 'post' as const, u: `/downloads/${id}/delete`, d: { delete_file: true } },
+    ]
+    for (const ep of eps) {
+      try {
+        if (ep.m === 'delete') await getClient().delete(ep.u)
+        else await getClient().post(ep.u, ep.d)
+        return true
+      } catch { continue }
+    }
+    return false
+  },
+
+  // --- Transfer Control ---
+  async deleteTransfer(id: string): Promise<boolean> {
+    try { await getClient().delete(`/transfers/${id}`); return true } catch { return false }
+  },
+
+  // --- Netdisk Cleanup ---
+  async deleteNetdiskFiles(paths: string[]): Promise<boolean> {
+    if (!paths.length) return false
+    const payloads = [{ paths }, { path: paths[0] }, { filelist: paths }]
+    const endpoints = ['/files/delete', '/file/delete']
+    for (const ep of endpoints) {
+      for (const payload of payloads) {
+        try { await getClient().post(ep, payload); return true } catch { continue }
+      }
+    }
+    return false
   }
 }
