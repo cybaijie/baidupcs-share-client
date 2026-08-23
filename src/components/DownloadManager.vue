@@ -220,7 +220,7 @@
             </el-table-column>
             <el-table-column prop="total_size" label="大小" width="120" sortable>
               <template #default="{ row }">
-                {{ formatSize(row.total_size) }}
+                {{ formatSize((row as FileTask).total_size ?? 0) }}
               </template>
             </el-table-column>
             <el-table-column label="进度" width="180">
@@ -238,7 +238,7 @@
             <el-table-column label="速度" width="120">
               <template #default="{ row }">
                 <span v-if="['downloading','running'].includes(row.status)" class="speed-text">
-                  {{ formatSpeed(row.speed) }}
+                  {{ formatSpeed((row as FileTask).speed ?? 0) }}
                 </span>
                 <span v-else class="placeholder-text">-</span>
               </template>
@@ -348,8 +348,8 @@ function formatSpeed(bytes?: number) {
 }
 
 function calcFileProgress(file: FileTask) {
-  const tot = file.total_size || 0
-  const dl = file.downloaded_size || 0
+  const tot = file.total_size ?? 0
+  const dl = file.downloaded_size ?? 0
   return tot > 0 ? Math.min(100, (dl / tot) * 100) : 0
 }
 
