@@ -258,7 +258,6 @@
     </el-dialog>
   </div>
 </template>
-
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -291,6 +290,9 @@ const loading = ref(false)
 let pollTimer: number | null = null
 let lastActiveTime = Date.now()
 const isPolling = ref(true)
+
+// Track which pending cleanup tasks have been "seen" with actual download subtasks
+const seenWithDownloads = new Set<string>()
 
 // Detail dialog
 const detailVisible = ref(false)
@@ -384,7 +386,7 @@ function resolveHierarchy(inputId: string) {
   const matchedFiles: FileTask[] = []
   const rawPaths = new Set<string>()
 
-  // 1. Direct match
+  // 1. Direct match by id
   for (const t of transferTasks.value) {
     if (t.id === inputId) {
       matchedTransfers.push(t)
@@ -411,14 +413,27 @@ function resolveHierarchy(inputId: string) {
     }
   }
 
-  // 2. Extract temp root dirs
+  // 2. Reverse lookup: find folders whose transfer_id/source_id matches inputId
+  for (const f of folderTasks.value) {
+    const fid = f.id || f.folder_id || f.task_id || ''
+    if (f.transfer_id === inputId || f.source_id === inputId) {
+      if (!matchedFolders.find(x => (x.id || x.folder_id || x.task_id) === fid)) {
+        matchedFolders.push(f)
+        if (f.path) rawPaths.add(f.path)
+        if (f.folder_path) rawPaths.add(f.folder_path)
+        if (f.save_path) rawPaths.add(f.save_path)
+      }
+    }
+  }
+
+  // 3. Extract temp root dirs from all paths
   const tempRootDirs = new Set<string>()
   for (const p of rawPaths) {
     const m = p.match(/(\/\.bpr_share_temp\/[^/]+)/)
     if (m) tempRootDirs.add(m[1])
   }
 
-  // 3. Spread by temp root dirs
+  // 4. Spread by temp root dirs
   for (const rootDir of tempRootDirs) {
     for (const t of transferTasks.value) {
       const tp = t.save_path || t.path || ''
@@ -442,7 +457,7 @@ function resolveHierarchy(inputId: string) {
     }
   }
 
-  // 4. Expand folder sub-files
+  // 5. Expand folder sub-files
   for (const f of matchedFolders) {
     const fid = f.id || f.folder_id || f.task_id || ''
     for (const dt of fileTasks.value) {
@@ -463,7 +478,7 @@ function resolveHierarchy(inputId: string) {
     }
   }
 
-  // 5. Expand transfer sub-tasks
+  // 6. Expand transfer sub-tasks
   for (const t of matchedTransfers) {
     for (const sub of (t as any).sub_tasks || []) {
       if (sub && typeof sub === 'object' && sub.id) {
@@ -690,6 +705,19 @@ const checkAutoCleanup = async () => {
   for (const taskId of pending) {
     const tree = resolveHierarchy(taskId)
 
+    // Must have at least one download task (folder or file) before considering cleanup
+    // This prevents cleanup when transfer is created but download tasks haven't spawned yet
+    const hasDownloadTasks = tree.folders.length > 0 || tree.files.length > 0
+
+    if (!hasDownloadTasks) {
+      // Transfer may still be processing; wait for download tasks to appear
+      continue
+    }
+
+    // Mark that we've seen this task with actual download subtasks
+    seenWithDownloads.add(taskId)
+
+    // Check if all download tasks are completed
     const allCompleted = tree.folders.every(f => {
       const status = f.status?.toLowerCase() || ''
       return ['completed', 'done', 'finished', 'success'].includes(status)
@@ -698,11 +726,10 @@ const checkAutoCleanup = async () => {
       return ['completed', 'done', 'finished', 'success'].includes(status)
     })
 
-    const noTasks = tree.folders.length === 0 && tree.files.length === 0 && tree.transfers.length === 0
-
-    if (allCompleted || noTasks) {
+    if (allCompleted) {
       await executeDeepDelete(taskId, false)
       removePendingAutoCleanup(taskId)
+      seenWithDownloads.delete(taskId)
       ElMessage.success(`任务 ${taskId.slice(0, 8)}... 已完成，网盘临时文件已自动清理`)
     }
   }
@@ -863,7 +890,6 @@ onMounted(() => {
 })
 onUnmounted(() => { stopPolling() })
 </script>
-
 <style scoped>
 .downloads-container { padding: 20px; max-width: 1200px; margin: 0 auto; }
 
