@@ -156,6 +156,17 @@
           </div>
         </el-form-item>
 
+        <el-form-item label="下载方式">
+          <el-radio-group v-model="settings.downloadMode" size="small">
+            <el-radio-button label="docker">Docker 直下</el-radio-button>
+            <el-radio-button label="internal">内部下载</el-radio-button>
+          </el-radio-group>
+          <div class="form-tip">
+            Docker 直下：由后端接管下载，客户端被动接收状态更新；任务暂停超过 1 分钟将停止主动轮询，改为 WebSocket 推送 / 手动刷新。<br>
+            内部下载：由本客户端接管并控制下载。
+          </div>
+        </el-form-item>
+
         <el-form-item label="最大重试次数" required>
           <el-input-number
             v-model="settings.maxRetry"

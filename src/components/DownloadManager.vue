@@ -7,9 +7,6 @@
         <el-tag :type="activeCount > 0 ? 'success' : 'info'" size="large">
           {{ activeCount }} 个任务进行中
         </el-tag>
-        <el-tag v-if="!isPolling" type="warning" size="small" style="margin-left:8px">
-          被动更新
-        </el-tag>
       </div>
       <div class="header-right">
         <div class="sort-control">
@@ -96,7 +93,7 @@
                 <div class="task-path">{{ card.path }}</div>
               </div>
               <div class="task-actions">
-                <el-button size="small" plain type="info" @click="showDetail(card)" v-if="card.isFolder">
+                <el-button v-if="card.isFolder" size="small" plain type="info" @click="showDetail(card)">
                   <el-icon><Document /></el-icon> 详情
                 </el-button>
                 <template v-if="card.status === 'active'">
@@ -210,7 +207,7 @@
               <template #default="{ row }">
                 <div class="file-name-cell">
                   <el-icon :size="16"><Document /></el-icon>
-                  <span>{{ row.name || extractFileNameFromPath(row.path) || extractFileNameFromPath(row.local_path) || extractFileNameFromPath(row.save_path) || 'file' }}</span>
+                  <span>{{ row.name }}</span>
                 </div>
               </template>
             </el-table-column>
@@ -258,8 +255,9 @@
     </el-dialog>
   </div>
 </template>
+
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, h } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Sort, Refresh, Link, ArrowDown,
@@ -267,16 +265,12 @@ import {
   Folder, Document, FolderOpened, Search
 } from '@element-plus/icons-vue'
 import { open } from '@tauri-apps/plugin-shell'
-import {
-  downloadApi,
-  markPendingAutoCleanup,
-  getPendingAutoCleanup,
-  removePendingAutoCleanup,
-  type FolderTask,
-  type FileTask,
-  type TransferTask
-} from '../api/downloads'
+import { downloadApi, type FolderTask, type FileTask, type TransferTask } from '../api/downloads'
+import { wsMessageCount } from '../api/websocket'
+import { useSettingsStore } from '../stores/settings'
+import { getAutoDeleteIds, takeAutoDelete } from '../stores/autoDelete'
 
+const settingsStore = useSettingsStore()
 defineEmits<{ (e: 'go-share-direct'): void }>()
 
 // ==================== Data ====================
@@ -288,12 +282,9 @@ const sortDesc = ref(true)
 const statusFilter = ref('all')
 const loading = ref(false)
 let pollTimer: number | null = null
-let lastActiveTime = Date.now()
-const isPolling = ref(true)
-
-// Auto cleanup state: taskId -> first time detected as completed
-const pendingCleanupTimers = new Map<string, number>()
-const cleanedTasks = new Set<string>()
+let wsDebounce: number | null = null
+let lastActiveAt = Date.now()
+let autoCleaning = false
 
 // Detail dialog
 const detailVisible = ref(false)
@@ -323,12 +314,6 @@ interface DisplayCard {
 }
 
 // ==================== Helpers ====================
-function extractFileNameFromPath(path?: string): string {
-  if (!path) return ''
-  const parts = path.split(/[\\/]/)
-  return parts[parts.length - 1] || ''
-}
-
 function mapStatus(raw: string): TaskStatus {
   const s = raw?.toLowerCase() || ''
   if (['downloading', 'running', 'active', 'pending'].includes(s)) return 'active'
@@ -375,223 +360,105 @@ function calcFileProgress(file: FileTask) {
   return tot > 0 ? Math.min(100, (dl / tot) * 100) : 0
 }
 
-function extractTempRoot(path: string): string | null {
-  const m = path.match(/(\/\.bpr_share_temp\/[^/]+)/)
-  return m ? m[1] : null
-}
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
-// ==================== Hierarchy Resolution (for manual delete) ====================
+/**
+ * 参考 test_baidupcs_api_v7.py 的 resolve_hierarchy：
+ * 根据传入 ID 递归关联其所属的 Transfer / Folder / File 以及网盘 .bpr_share_temp/{id} 根目录
+ */
 function resolveHierarchy(inputId: string) {
-  const matchedTransfers: TransferTask[] = []
-  const matchedFolders: FolderTask[] = []
-  const matchedFiles: FileTask[] = []
+  const tSet = new Set<string>()
+  const fSet = new Set<string>()
+  const dSet = new Set<string>()
   const rawPaths = new Set<string>()
+  const dirPath = (t: any) => (t && typeof t === 'object' ? (t.path || t.save_path || t.local_path || t.folder_path || '') : '') || ''
 
-  // 1. Direct match by id
   for (const t of transferTasks.value) {
-    if (t.id === inputId) {
-      matchedTransfers.push(t)
-      if (t.save_path) rawPaths.add(t.save_path)
-      if (t.path) rawPaths.add(t.path)
-    }
+    if (t.id === inputId) { tSet.add(t.id); const p = dirPath(t); if (p) rawPaths.add(p) }
   }
   for (const f of folderTasks.value) {
-    const fid = f.id || f.folder_id || f.task_id || ''
-    if (fid === inputId) {
-      matchedFolders.push(f)
-      if (f.path) rawPaths.add(f.path)
-      if (f.folder_path) rawPaths.add(f.folder_path)
-      if (f.save_path) rawPaths.add(f.save_path)
-    }
+    if (f.id === inputId) { fSet.add(f.id); const p = f.path || ''; if (p) rawPaths.add(p) }
   }
-  for (const dt of fileTasks.value) {
-    const did = dt.id || dt.task_id || ''
-    if (did === inputId) {
-      matchedFiles.push(dt)
-      if (dt.path) rawPaths.add(dt.path)
-      if (dt.local_path) rawPaths.add(dt.local_path)
-      if (dt.save_path) rawPaths.add(dt.save_path)
-    }
+  for (const f of fileTasks.value) {
+    if (f.id === inputId) { dSet.add(f.id); const p = f.path || f.local_path || f.save_path || ''; if (p) rawPaths.add(p) }
   }
 
-  // 2. Reverse lookup: find folders whose transfer_id/source_id matches inputId
+  // 提取网盘临时根目录 /.bpr_share_temp/<UUID>
+  const tempRoots = new Set<string>()
+  for (const p of rawPaths) { const m = p.match(/(\/\.bpr_share_temp\/[^/]+)/); if (m) tempRoots.add(m[1]) }
+
+  // 依据 tempRoots 扩散关联
+  for (const root of tempRoots) {
+    for (const t of transferTasks.value) if (dirPath(t).includes(root)) tSet.add(t.id)
+    for (const f of folderTasks.value) if ((f.path || '').includes(root)) fSet.add(f.id)
+    for (const f of fileTasks.value) if ((f.path || f.local_path || f.save_path || '').includes(root)) dSet.add(f.id)
+  }
+
+  // 展开 folder 关联的子文件
   for (const f of folderTasks.value) {
-    const fid = f.id || f.folder_id || f.task_id || ''
-    if (f.transfer_id === inputId || f.source_id === inputId) {
-      if (!matchedFolders.find(x => (x.id || x.folder_id || x.task_id) === fid)) {
-        matchedFolders.push(f)
-        if (f.path) rawPaths.add(f.path)
-        if (f.folder_path) rawPaths.add(f.folder_path)
-        if (f.save_path) rawPaths.add(f.save_path)
+    if (fSet.has(f.id)) {
+      for (const sub of fileTasks.value) {
+        if (sub.group_id === f.id || sub.folder_id === f.id || sub.parent_task_id === f.id) dSet.add(sub.id)
       }
     }
   }
 
-  // 3. Extract temp root dirs from all paths
-  const tempRootDirs = new Set<string>()
-  for (const p of rawPaths) {
-    const m = p.match(/(\/\.bpr_share_temp\/[^/]+)/)
-    if (m) tempRootDirs.add(m[1])
-  }
-
-  // 4. Spread by temp root dirs
-  for (const rootDir of tempRootDirs) {
-    for (const t of transferTasks.value) {
-      const tp = t.save_path || t.path || ''
-      if (tp.includes(rootDir) && !matchedTransfers.find(x => x.id === t.id)) {
-        matchedTransfers.push(t)
-      }
-    }
-    for (const f of folderTasks.value) {
-      const fp = f.path || f.folder_path || f.save_path || ''
-      const fid = f.id || f.folder_id || f.task_id || ''
-      if (fp.includes(rootDir) && !matchedFolders.find(x => (x.id || x.folder_id || x.task_id) === fid)) {
-        matchedFolders.push(f)
-      }
-    }
-    for (const dt of fileTasks.value) {
-      const dp = dt.path || dt.local_path || dt.save_path || ''
-      const did = dt.id || dt.task_id || ''
-      if (dp.includes(rootDir) && !matchedFiles.find(x => (x.id || x.task_id) === did)) {
-        matchedFiles.push(dt)
+  // 展开 transfer 关联的子任务
+  for (const t of transferTasks.value) {
+    if (tSet.has(t.id)) {
+      for (const sub of (t.sub_tasks || [])) {
+        const sid = sub && typeof sub === 'object' ? (sub.id || sub.task_id) : null
+        if (sid) dSet.add(String(sid))
       }
     }
   }
-
-  // 5. Expand folder sub-files
-  for (const f of matchedFolders) {
-    const fid = f.id || f.folder_id || f.task_id || ''
-    for (const dt of fileTasks.value) {
-      const did = dt.id || dt.task_id || ''
-      if ((dt.group_id === fid || dt.folder_id === fid || dt.parent_task_id === fid) &&
-          !matchedFiles.find(x => (x.id || x.task_id) === did)) {
-        matchedFiles.push(dt)
-      }
-    }
-    for (const sub of (f.sub_tasks || f.files || f.task_ids || [])) {
-      if (typeof sub === 'string') {
-        const found = fileTasks.value.find(dt => (dt.id || dt.task_id) === sub)
-        if (found && !matchedFiles.find(x => (x.id || x.task_id) === sub)) matchedFiles.push(found)
-      } else if (sub && typeof sub === 'object' && sub.id) {
-        const found = fileTasks.value.find(dt => (dt.id || dt.task_id) === sub.id)
-        if (found && !matchedFiles.find(x => (x.id || x.task_id) === sub.id)) matchedFiles.push(found)
-      }
-    }
-  }
-
-  // 6. Expand transfer sub-tasks
-  for (const t of matchedTransfers) {
-    for (const sub of (t as any).sub_tasks || []) {
-      if (sub && typeof sub === 'object' && sub.id) {
-        const found = fileTasks.value.find(dt => (dt.id || dt.task_id) === sub.id)
-        if (found && !matchedFiles.find(x => (x.id || x.task_id) === sub.id)) matchedFiles.push(found)
-      }
-    }
-  }
-
-  const allCleanPaths = Array.from(new Set([...rawPaths, ...tempRootDirs]))
 
   return {
-    transfers: matchedTransfers,
-    folders: matchedFolders,
-    files: matchedFiles,
-    savePaths: allCleanPaths,
-    tempRootDirs: Array.from(tempRootDirs)
+    transfers: [...tSet],
+    folders: [...fSet],
+    files: [...dSet],
+    tempRoots: [...tempRoots],
   }
 }
 
-// ==================== Deep Delete (manual) ====================
-async function executeDeepDelete(inputId: string, deleteLocalFiles: boolean) {
-  const tree = resolveHierarchy(inputId)
+/**
+ * 彻底删除任务（类似 test_baidupcs_api_v7.py --action delete）：
+ * 销毁文件夹卡片 / 子文件下载流 / 转存记录 / 网盘临时目录
+ */
+async function deleteCardLikeScript(inputId: string) {
+  const { folders, files, transfers, tempRoots } = resolveHierarchy(inputId)
 
-  // Pause
-  for (const f of tree.folders) {
-    const fid = f.id || f.folder_id || f.task_id || ''
-    if (fid) await downloadApi.pauseFolder(fid)
-  }
-  for (const f of tree.files) {
-    const fid = f.id || f.task_id || ''
-    if (fid) await downloadApi.pauseFile(fid)
-  }
+  // 1. 先暂停
+  for (const fid of folders) await downloadApi.pauseFolder(fid)
+  for (const did of files) await downloadApi.pauseFile(did)
+  await sleep(500)
 
-  // Delete folder tasks
-  for (const f of tree.folders) {
-    const fid = f.id || f.folder_id || f.task_id || ''
-    if (fid) {
-      if (deleteLocalFiles) await downloadApi.deleteFolder(fid)
-      else await downloadApi.deleteFolderRecordOnly(fid)
-    }
-  }
-
-  // Delete file tasks
-  for (const f of tree.files) {
-    const fid = f.id || f.task_id || ''
-    if (fid) {
-      if (deleteLocalFiles) await downloadApi.deleteFile(fid)
-      else await downloadApi.deleteFileRecordOnly(fid)
-    }
-  }
-
-  // Delete transfers
-  for (const t of tree.transfers) {
-    if (t.id) await downloadApi.deleteTransfer(t.id)
-  }
-
-  // Clean netdisk temp dirs
-  if (tree.tempRootDirs.length > 0) {
-    await downloadApi.deleteNetdiskFiles(tree.tempRootDirs)
-  }
+  // 2. 销毁文件夹任务卡片（同时删除本地文件，同 python 脚本）
+  for (const fid of folders) await downloadApi.deleteFolder(fid)
+  // 3. 销毁子文件下载流
+  for (const did of files) await downloadApi.deleteFile(did)
+  // 4. 销毁转存记录
+  for (const tid of transfers) await downloadApi.deleteTransfer(tid)
+  // 5. 清理网盘临时目录
+  if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
 }
 
-// ==================== Auto Cleanup (conservative) ====================
-async function executeAutoCleanup(taskId: string) {
-  // 1. Delete transfer record
-  await downloadApi.deleteTransfer(taskId)
-
-  // 2. Find related folders by transfer_id / source_id (strict, no path spreading)
-  const relatedFolders = folderTasks.value.filter(f =>
-    f.transfer_id === taskId || f.source_id === taskId
-  )
-  const relatedFolderIds = new Set(relatedFolders.map(f => f.id || f.folder_id || f.task_id || ''))
-
-  // 3. Find related files by group_id / folder_id / parent_task_id
-  const relatedFiles = fileTasks.value.filter(f =>
-    relatedFolderIds.has(f.group_id || '') ||
-    relatedFolderIds.has(f.folder_id || '') ||
-    relatedFolderIds.has(f.parent_task_id || '')
-  )
-
-  // 4. Collect netdisk temp paths
-  const paths = new Set<string>()
-  for (const f of relatedFolders) {
-    const p = f.path || f.folder_path || f.save_path || ''
-    if (p) {
-      paths.add(p)
-      const m = extractTempRoot(p)
-      if (m) paths.add(m)
-    }
-  }
-  for (const f of relatedFiles) {
-    const p = f.path || f.local_path || f.save_path || ''
-    if (p) {
-      paths.add(p)
-      const m = extractTempRoot(p)
-      if (m) paths.add(m)
-    }
-  }
-  if (paths.size > 0) {
-    await downloadApi.deleteNetdiskFiles(Array.from(paths))
-  }
-
-  // 5. Delete download records only (keep local files)
-  for (const f of relatedFolders) {
-    const fid = f.id || f.folder_id || f.task_id || ''
-    if (fid) await downloadApi.deleteFolderRecordOnly(fid)
-  }
-  for (const f of relatedFiles) {
-    const fid = f.id || f.task_id || ''
-    if (fid) await downloadApi.deleteFileRecordOnly(fid)
-  }
+function showBatchDeleteConfirm(cards: DisplayCard[]) {
+  const shown = cards.slice(0, 5)
+  const extra = cards.length - shown.length
+  const icon = (isFolder: boolean) => (isFolder ? '📁' : '📄')
+  const content = h('div', { class: 'batch-delete-confirm' }, [
+    h('div', { class: 'bdc-title' }, `将删除 ${cards.length} 个文件/文件夹，请确认：`),
+    ...shown.map(c => h('div', { class: 'bdc-item' }, `${icon(c.isFolder)} ${c.name}`)),
+    extra > 0 ? h('div', { class: 'bdc-more' }, `...另有 ${extra} 项未展示`) : null,
+    h('div', { class: 'bdc-hint' }, '删除将同时清理转存记录与网盘临时文件。'),
+  ])
+  return ElMessageBox.confirm(content, '批量删除确认', {
+    type: 'warning',
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+    confirmButtonClass: 'el-button--danger',
+  })
 }
 
 // ==================== Computed ====================
@@ -617,8 +484,6 @@ const displayCards = computed((): DisplayCard[] => {
       if (allDone) effStatus = 'completed'
       else if (anyActive) effStatus = 'active'
     }
-    // If folder status says completed but subs say otherwise, trust subs
-    // If subs empty and folder status is not completed, keep folder status
 
     const transfer = transferTasks.value.find(t => {
       if (folder.transfer_id) return t.id === folder.transfer_id
@@ -628,7 +493,7 @@ const displayCards = computed((): DisplayCard[] => {
 
     cards.push({
       id: folder.id,
-      name: folder.name || folder.folder_name || extractFileNameFromPath(folder.path) || extractFileNameFromPath(folder.folder_path) || extractFileNameFromPath(folder.save_path) || 'folder',
+      name: folder.name || 'folder',
       status: effStatus,
       rawStatus: folder.status,
       path: folder.path || '',
@@ -657,7 +522,7 @@ const displayCards = computed((): DisplayCard[] => {
     const progress = ftot > 0 ? (fdl / ftot) * 100 : 0
     cards.push({
       id: file.id,
-      name: file.name || file.filename || extractFileNameFromPath(file.path) || extractFileNameFromPath(file.local_path) || extractFileNameFromPath(file.save_path) || 'file',
+      name: file.name || 'file',
       status: mapStatus(file.status),
       rawStatus: file.status,
       path: file.path || '',
@@ -718,113 +583,8 @@ const detailFiles = computed(() => {
 const filteredDetailFiles = computed(() => {
   if (!detailSearch.value) return detailFiles.value
   const kw = detailSearch.value.toLowerCase()
-  return detailFiles.value.filter(f => {
-    const name = (f.name || extractFileNameFromPath(f.path) || extractFileNameFromPath(f.local_path) || extractFileNameFromPath(f.save_path) || '').toLowerCase()
-    return name.includes(kw)
-  })
+  return detailFiles.value.filter(f => (f.name || '').toLowerCase().includes(kw))
 })
-
-// ==================== Polling ====================
-const startPolling = () => {
-  if (pollTimer) return
-  isPolling.value = true
-  pollTimer = window.setInterval(async () => {
-    await fetchAll()
-    const hasActive = displayCards.value.some(c => c.status === 'active')
-    if (hasActive) {
-      lastActiveTime = Date.now()
-    } else if (Date.now() - lastActiveTime > 60000) {
-      if (pollTimer) {
-        clearInterval(pollTimer)
-        pollTimer = null
-        isPolling.value = false
-      }
-    }
-  }, 3000)
-}
-
-const stopPolling = () => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-  isPolling.value = false
-}
-
-// ==================== Auto Cleanup ====================
-const checkAutoCleanup = async () => {
-  const pending = getPendingAutoCleanup()
-  if (pending.length === 0) return
-
-  for (const taskId of pending) {
-    if (cleanedTasks.has(taskId)) continue
-
-    // 1. Find the transfer task
-    const transfer = transferTasks.value.find(t => t.id === taskId)
-    if (!transfer) {
-      // Transfer already gone (backend cleaned it up), remove from pending
-      removePendingAutoCleanup(taskId)
-      pendingCleanupTimers.delete(taskId)
-      continue
-    }
-
-    // 2. Transfer must be completed
-    const transferStatus = transfer.status?.toLowerCase() || ''
-    if (!['completed', 'done', 'finished', 'success'].includes(transferStatus)) {
-      pendingCleanupTimers.delete(taskId)
-      continue
-    }
-
-    // 3. Find related download tasks (strict: only by transfer_id/source_id, no path spreading)
-    const relatedFolders = folderTasks.value.filter(f =>
-      f.transfer_id === taskId || f.source_id === taskId
-    )
-    const relatedFolderIds = new Set(relatedFolders.map(f => f.id || f.folder_id || f.task_id || ''))
-    const relatedFiles = fileTasks.value.filter(f =>
-      relatedFolderIds.has(f.group_id || '') ||
-      relatedFolderIds.has(f.folder_id || '') ||
-      relatedFolderIds.has(f.parent_task_id || '')
-    )
-
-    // 4. Must have actual download tasks before considering cleanup
-    // This prevents cleanup when transfer is created but download tasks haven't spawned yet
-    if (relatedFolders.length === 0 && relatedFiles.length === 0) {
-      pendingCleanupTimers.delete(taskId)
-      continue
-    }
-
-    // 5. Check if all related download tasks are completed
-    const allFoldersDone = relatedFolders.every(f => {
-      const s = f.status?.toLowerCase() || ''
-      return ['completed', 'done', 'finished', 'success'].includes(s)
-    })
-    const allFilesDone = relatedFiles.every(f => {
-      const s = f.status?.toLowerCase() || ''
-      return ['completed', 'done', 'finished', 'success'].includes(s)
-    })
-
-    if (allFoldersDone && allFilesDone) {
-      const now = Date.now()
-      const firstSeen = pendingCleanupTimers.get(taskId)
-
-      if (!firstSeen) {
-        // First time detected as completed, start timer
-        pendingCleanupTimers.set(taskId, now)
-      } else if (now - firstSeen >= 15000) {
-        // Consistently completed for 15 seconds, execute cleanup
-        await executeAutoCleanup(taskId)
-        removePendingAutoCleanup(taskId)
-        pendingCleanupTimers.delete(taskId)
-        cleanedTasks.add(taskId)
-        ElMessage.success(`任务 ${taskId.slice(0, 8)}... 已完成，网盘临时文件已自动清理`)
-      }
-      // else: still within confirmation period, wait
-    } else {
-      // Tasks not all completed, reset timer
-      pendingCleanupTimers.delete(taskId)
-    }
-  }
-}
 
 // ==================== Actions ====================
 const fetchAll = async () => {
@@ -838,15 +598,57 @@ const fetchAll = async () => {
   fileTasks.value = files
   transferTasks.value = transfers
   loading.value = false
-  await checkAutoCleanup()
+  trackLastActive()
+  await handleAutoDelete()
+}
+
+function trackLastActive() {
+  if (displayCards.value.some(c => c.status === 'active')) {
+    lastActiveAt = Date.now()
+  }
+}
+
+// docker 被动模式：任务暂停超过 1 分钟不再主动轮询，改为被动更新（WebSocket 推送 / 手动刷新）
+function shouldPoll() {
+  if (settingsStore.config.downloadMode === 'internal') return true
+  const active = displayCards.value.some(c => c.status === 'active')
+  if (active) return true
+  return (Date.now() - lastActiveAt) <= 60000
+}
+
+// 勾选了"下载完成后自动删除网盘转存文件"的任务，下载完成后删除转存记录与网盘临时目录
+const handleAutoDelete = async () => {
+  if (autoCleaning) return
+  const ids = getAutoDeleteIds()
+  if (!ids.length) return
+  autoCleaning = true
+  let cleaned = false
+  try {
+    for (const taskId of ids) {
+      const { folders, files, transfers, tempRoots } = resolveHierarchy(taskId)
+      const anyDone = folders.some(fid => {
+        const f = folderTasks.value.find(x => x.id === fid)
+        return f && ['completed', 'done', 'finished'].includes(f.status)
+      })
+      const fileDone = files.some(did => {
+        const d = fileTasks.value.find(x => x.id === did)
+        return d && ['completed', 'done', 'finished'].includes(d.status)
+      })
+      if (anyDone || fileDone) {
+        for (const tid of transfers) await downloadApi.deleteTransfer(tid)
+        if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
+        takeAutoDelete(taskId)
+        cleaned = true
+      }
+    }
+  } finally {
+    autoCleaning = false
+  }
+  if (cleaned) await fetchAll()
 }
 
 const refreshTasks = () => {
   fetchAll()
-  if (!isPolling.value) {
-    lastActiveTime = Date.now()
-    startPolling()
-  }
   ElMessage.success('任务列表已刷新')
 }
 
@@ -868,30 +670,18 @@ const handleResume = async (card: DisplayCard) => {
   } else {
     await downloadApi.resumeFile(card.id)
   }
-  lastActiveTime = Date.now()
-  startPolling()
   ElMessage.success('已开始')
   fetchAll()
 }
 
 const handleDelete = async (card: DisplayCard) => {
   try {
-    const tree = resolveHierarchy(card.id)
-    const names = [
-      ...tree.folders.map(f => f.name || f.folder_name || extractFileNameFromPath(f.path) || '文件夹'),
-      ...tree.files.map(f => f.name || f.filename || extractFileNameFromPath(f.path) || '文件')
-    ]
-    const displayNames = names.slice(0, 5)
-    const moreCount = names.length - 5
-    let msg = `确定删除该任务吗？`
-    if (displayNames.length > 0) {
-      msg += '\n\n' + displayNames.map(n => `• ${n}`).join('\n')
-      if (moreCount > 0) msg += `\n... 还有 ${moreCount} 个`
-    }
-    msg += '\n\n⚠️ 本地文件也将被删除'
-
-    await ElMessageBox.confirm(msg, '确认删除', { type: 'warning' })
-    await executeDeepDelete(card.id, true)
+    await ElMessageBox.confirm(
+      '确定删除该任务吗？\n删除将同时清理转存记录与网盘临时文件。',
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
+    )
+    await deleteCardLikeScript(card.id)
     ElMessage.success('任务已删除')
     fetchAll()
   } catch { /* cancel */ }
@@ -931,56 +721,58 @@ const batchDelete = async () => {
     ElMessage.info('没有可删除的任务')
     return
   }
-
-  const allNames: string[] = []
-  for (const card of cards) {
-    const tree = resolveHierarchy(card.id)
-    const names = [
-      ...tree.folders.map(f => f.name || f.folder_name || extractFileNameFromPath(f.path) || '文件夹'),
-      ...tree.files.map(f => f.name || f.filename || extractFileNameFromPath(f.path) || '文件')
-    ]
-    allNames.push(...names)
-  }
-
-  const displayNames = allNames.slice(0, 5)
-  const moreCount = allNames.length - 5
-  let msg = `确定批量删除 ${allNames.length} 个任务吗？`
-  msg += '\n\n' + displayNames.map(n => `• ${n}`).join('\n')
-  if (moreCount > 0) msg += `\n... 还有 ${moreCount} 个`
-  msg += '\n\n⚠️ 本地文件也将被删除'
-
   try {
-    await ElMessageBox.confirm(msg, '确认批量删除', { type: 'warning' })
+    await showBatchDeleteConfirm(cards)
     for (const card of cards) {
-      await executeDeepDelete(card.id, true)
+      await deleteCardLikeScript(card.id)
     }
-    ElMessage.success('所有任务已删除')
+    ElMessage.success(`已删除 ${cards.length} 个任务`)
     fetchAll()
-  } catch {}
+  } catch { /* cancel */ }
 }
 
 const clearCompleted = async () => {
   const completed = displayCards.value.filter(c => c.status === 'completed')
   if (completed.length === 0) {
-    ElMessage.info('没有已完成的任务')
+    ElMessage.info('没有已完成任务')
     return
   }
   try {
-    await ElMessageBox.confirm(`确定清除 ${completed.length} 个已完成任务吗？\n\n✓ 本地文件将保留`, '确认清除', { type: 'info' })
+    await ElMessageBox.confirm(
+      `确定清除 ${completed.length} 个已完成任务吗？\n将保留本地已下载文件，仅清理下载记录、转存记录与网盘临时文件。`,
+      '清除已完成',
+      { type: 'warning', confirmButtonText: '清除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
+    )
     for (const card of completed) {
-      await executeDeepDelete(card.id, false)
+      const { folders, files, transfers, tempRoots } = resolveHierarchy(card.id)
+      for (const fid of folders) await downloadApi.removeFolderRecord(fid)
+      for (const did of files) await downloadApi.removeFileRecord(did)
+      for (const tid of transfers) await downloadApi.deleteTransfer(tid)
+      if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
     }
-    ElMessage.success('已清除已完成任务')
+    ElMessage.success('已清除已完成任务（保留本地文件）')
     fetchAll()
-  } catch {}
+  } catch { /* cancel */ }
 }
 
 onMounted(() => {
   fetchAll()
-  startPolling()
+  pollTimer = window.setInterval(() => {
+    if (shouldPoll()) fetchAll()
+  }, 3000)
 })
-onUnmounted(() => { stopPolling() })
+
+watch(wsMessageCount, () => {
+  if (wsDebounce) clearTimeout(wsDebounce)
+  wsDebounce = window.setTimeout(() => fetchAll(), 500)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (wsDebounce) clearTimeout(wsDebounce)
+})
 </script>
+
 <style scoped>
 .downloads-container { padding: 20px; max-width: 1200px; margin: 0 auto; }
 
@@ -1100,4 +892,17 @@ onUnmounted(() => { stopPolling() })
 }
 .speed-text { color: #409eff; font-weight: 500; }
 .placeholder-text { color: #c0c4cc; }
+
+/* Batch delete confirmation */
+.batch-delete-confirm { font-size: 14px; line-height: 1.7; }
+.bdc-title { margin-bottom: 10px; font-weight: 500; color: #303133; }
+.bdc-item {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #f5f7fa;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+.bdc-more { color: #909399; font-size: 13px; margin: 6px 0; }
+.bdc-hint { color: #e6a23c; font-size: 12px; margin-top: 8px; }
 </style>

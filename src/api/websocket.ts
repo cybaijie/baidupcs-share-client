@@ -5,6 +5,8 @@ let reconnectTimer: number | null = null
 const isConnected = ref(false)
 
 export const wsMessages = ref<any[]>([])
+// 递增计数器，用于触发被动刷新（DownloadManager 监听）
+export const wsMessageCount = ref(0)
 
 export function connectWebSocket(serverUrl: string) {
   const wsUrl = serverUrl.replace(/^http/, 'ws') + '/api/v1/ws'
@@ -28,11 +30,13 @@ export function connectWebSocket(serverUrl: string) {
     try {
       const msg = JSON.parse(event.data)
       wsMessages.value.push(msg)
+      wsMessageCount.value++
       if (wsMessages.value.length > 100) {
         wsMessages.value.shift()
       }
     } catch {
       wsMessages.value.push({ type: 'raw', data: event.data })
+      wsMessageCount.value++
     }
   }
 

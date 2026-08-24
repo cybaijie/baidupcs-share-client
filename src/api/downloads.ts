@@ -31,28 +31,6 @@ function getClient() {
   return client
 }
 
-// ==================== Pending Auto Cleanup ====================
-const pendingAutoCleanup = new Set<string>()
-
-export function markPendingAutoCleanup(taskId: string) {
-  pendingAutoCleanup.add(taskId)
-}
-
-export function getPendingAutoCleanup(): string[] {
-  return Array.from(pendingAutoCleanup)
-}
-
-export function removePendingAutoCleanup(taskId: string) {
-  pendingAutoCleanup.delete(taskId)
-}
-
-// ==================== Helpers ====================
-function extractNameFromPath(path?: string): string {
-  if (!path) return ''
-  const parts = path.split(/[\\/]/)
-  return parts[parts.length - 1] || ''
-}
-
 // ==================== Types ====================
 
 export interface TransferTask {
@@ -63,6 +41,8 @@ export interface TransferTask {
   save_path?: string
   path?: string
   created_at?: string
+  sub_tasks?: any[]
+  download_tasks?: any[]
 }
 
 export interface FolderTask {
@@ -118,6 +98,13 @@ export interface FileTask {
 
 // ==================== API ====================
 
+function basenameFromPath(p?: string): string {
+  if (!p) return ''
+  const clean = p.replace(/[\\/]+$/, '')
+  const seg = clean.split(/[\\/]/).pop()
+  return seg && seg !== '.' ? seg : ''
+}
+
 export const downloadApi = {
   // --- List ---
   async getTransfers(): Promise<TransferTask[]> {
@@ -142,7 +129,7 @@ export const downloadApi = {
           results.push({
             ...f,
             id: String(f.id || f.folder_id || f.task_id || ''),
-            name: f.name || f.folder_name || extractNameFromPath(f.path) || extractNameFromPath(f.folder_path) || extractNameFromPath(f.save_path) || 'folder',
+            name: f.name || f.folder_name || 'folder',
             path: f.path || f.folder_path || f.save_path || '',
             status: f.status || 'unknown',
             total_size: f.total_size || f.size || 0,
@@ -171,10 +158,18 @@ export const downloadApi = {
         const list = Array.isArray(data) ? data : (data?.tasks || data?.downloads || data?.list || [])
         for (const t of list) {
           if (ep === '/downloads/all' && (t.type === 'folder' || t.is_folder)) continue
+          const tpath = t.path || t.local_path || t.save_path || ''
+          const tname = t.name || t.filename || basenameFromPath(tpath)
           results.push({
             ...t,
             id: String(t.id || t.task_id || ''),
-            name: t.name || t.filename || extractNameFromPath(t.path) || extractNameFromPath(t.local_path) || extractNameFromPath(t.save_path) || 'file',
+            name: tname || 'file',
+            path: tpath,
+            local_path: t.local_path || t.save_path || '',
+            save_path: t.save_path || t.local_path || '',
+            group_id: t.group_id,
+            folder_id: t.folder_id,
+            parent_task_id: t.parent_task_id,
             status: t.status || 'unknown',
             total_size: t.total_size || t.size || 0,
             downloaded_size: t.downloaded_size || t.completed_size || 0,
@@ -216,20 +211,6 @@ export const downloadApi = {
     }
     return false
   },
-  async deleteFolderRecordOnly(id: string): Promise<boolean> {
-    const eps = [
-      { m: 'delete' as const, u: `/downloads/folder/${id}` },
-      { m: 'post' as const, u: `/downloads/folder/${id}/cancel` },
-    ]
-    for (const ep of eps) {
-      try {
-        if (ep.m === 'delete') await getClient().delete(ep.u)
-        else await getClient().post(ep.u)
-        return true
-      } catch { continue }
-    }
-    return false
-  },
 
   // --- File Control ---
   async pauseFile(id: string): Promise<boolean> {
@@ -257,11 +238,18 @@ export const downloadApi = {
     }
     return false
   },
-  async deleteFileRecordOnly(id: string): Promise<boolean> {
+
+  // --- Transfer Control ---
+  async deleteTransfer(id: string): Promise<boolean> {
+    try { await getClient().delete(`/transfers/${id}`); return true } catch { return false }
+  },
+
+  // --- Record removal WITHOUT deleting local files (used by 清除已完成) ---
+  async removeFolderRecord(id: string): Promise<boolean> {
     const eps = [
-      { m: 'delete' as const, u: `/downloads/${id}` },
-      { m: 'post' as const, u: '/downloads/batch/delete', d: { task_ids: [id] } },
-      { m: 'post' as const, u: `/downloads/${id}/delete` },
+      { m: 'delete' as const, u: `/downloads/folder/${id}` },
+      { m: 'delete' as const, u: `/downloads/folders/${id}` },
+      { m: 'post' as const, u: `/downloads/folder/${id}/cancel`, d: { delete_files: false } },
     ]
     for (const ep of eps) {
       try {
@@ -273,9 +261,20 @@ export const downloadApi = {
     return false
   },
 
-  // --- Transfer Control ---
-  async deleteTransfer(id: string): Promise<boolean> {
-    try { await getClient().delete(`/transfers/${id}`); return true } catch { return false }
+  async removeFileRecord(id: string): Promise<boolean> {
+    const eps = [
+      { m: 'delete' as const, u: `/downloads/${id}` },
+      { m: 'post' as const, u: '/downloads/batch/delete', d: { task_ids: [id], delete_file: false, delete_files: false } },
+      { m: 'post' as const, u: `/downloads/${id}/delete`, d: { delete_file: false } },
+    ]
+    for (const ep of eps) {
+      try {
+        if (ep.m === 'delete') await getClient().delete(ep.u)
+        else await getClient().post(ep.u, ep.d)
+        return true
+      } catch { continue }
+    }
+    return false
   },
 
   // --- Netdisk Cleanup ---

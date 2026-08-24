@@ -18,6 +18,7 @@ export interface AppConfig {
   proxyUsername: string
   proxyPassword: string
   proxyAutoFallback: boolean
+  downloadMode: 'docker' | 'internal'
 }
 
 const DEFAULTS: AppConfig = {
@@ -36,6 +37,7 @@ const DEFAULTS: AppConfig = {
   proxyUsername: '',
   proxyPassword: '',
   proxyAutoFallback: true,
+  downloadMode: 'docker',
 }
 
 export const useSettingsStore = defineStore('settings', () => {

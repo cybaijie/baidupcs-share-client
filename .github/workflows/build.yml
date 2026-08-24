@@ -24,18 +24,6 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Generate icons
-        shell: pwsh
-        run: |
-          if (Test-Path "src-tauri/icons/source.png") {
-            choco install imagemagick -y
-            $env:Path += ";C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"
-            magick src-tauri/icons/source.png -resize 32x32 src-tauri/icons/32x32.png
-            magick src-tauri/icons/source.png -resize 128x128 src-tauri/icons/128x128.png
-            magick src-tauri/icons/source.png -resize 256x256 src-tauri/icons/128x128@2x.png
-            magick src-tauri/icons/source.png -define icon:auto-resize=32,128,256 src-tauri/icons/icon.ico
-          }
-
       - name: Install dependencies
         run: npm install
 

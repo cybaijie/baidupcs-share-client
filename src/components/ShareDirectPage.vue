@@ -129,8 +129,8 @@ import {
   type PreviewResponse,
   type TransferResponse
 } from '../api/share'
-import { markPendingAutoCleanup } from '../api/downloads'
 import { useSettingsStore } from '../stores/settings'
+import { markAutoDelete } from '../stores/autoDelete'
 import ShareFileSelector from './ShareFileSelector.vue'
 
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -281,9 +281,7 @@ const handleDownloadAll = async () => {
         form.autoDelete ? '下载完成后将自动清理网盘转存文件。' : ''
       }`
     }
-    if (form.autoDelete) {
-      markPendingAutoCleanup(data.task_id)
-    }
+    markAutoDelete(data.task_id, form.autoDelete)
     step.value = 3
     ElMessage.success('已开始下载全部文件')
   } catch (e: any) {
@@ -319,9 +317,7 @@ const handleStartDownload = async () => {
         selectedFiles.value.length
       } 个文件。${form.autoDelete ? '下载完成后将自动清理网盘转存文件。' : ''}`
     }
-    if (form.autoDelete) {
-      markPendingAutoCleanup(data.task_id)
-    }
+    markAutoDelete(data.task_id, form.autoDelete)
     step.value = 3
     ElMessage.success('下载任务已创建')
   } catch (e: any) {
