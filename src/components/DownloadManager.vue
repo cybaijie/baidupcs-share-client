@@ -66,6 +66,20 @@
       </el-radio-group>
     </div>
 
+    <!-- Stuck warning -->
+    <el-alert
+      v-if="stuckTasks.length > 0"
+      class="stuck-alert"
+      type="warning"
+      :closable="false"
+      show-icon
+    >
+      <template #title>
+        检测到 {{ stuckTasks.length }} 个任务，后端仍显示"下载中"但子文件已全部完成（疑似后端卡住）：{{ stuckTasks.map(t => t.name).slice(0, 3).join('、') }}{{ stuckTasks.length > 3 ? '…' : '' }}。
+        请点击右上角"刷新"重试；若后端仍不更新，可删除该任务后重新下载。
+      </template>
+    </el-alert>
+
     <!-- Task List -->
     <div class="task-container">
       <div v-if="displayCards.length > 0" class="task-list">
@@ -481,8 +495,16 @@ const displayCards = computed((): DisplayCard[] => {
     if (subs.length > 0) {
       const allDone = subs.every(f => ['completed', 'done', 'finished'].includes(f.status))
       const anyActive = subs.some(f => ['downloading', 'running'].includes(f.status))
-      if (allDone) effStatus = 'completed'
-      else if (anyActive) effStatus = 'active'
+      const folderIsActive = ['downloading', 'running', 'active', 'pending'].includes((folder.status || '').toLowerCase())
+      if (allDone && folderIsActive && !anyActive) {
+        // 后端文件夹仍显示"下载中"但子文件已全部完成（疑似后端卡住/未完成最终化）：
+        // 不再误报"已完成"，保持真实的后端状态，并在顶部提示
+        effStatus = 'active'
+      } else if (allDone) {
+        effStatus = 'completed'
+      } else if (anyActive) {
+        effStatus = 'active'
+      }
     }
 
     const transfer = transferTasks.value.find(t => {
@@ -565,6 +587,25 @@ const displayCards = computed((): DisplayCard[] => {
 })
 
 const activeCount = computed(() => displayCards.value.filter(c => c.status === 'active').length)
+
+// 检测后端疑似卡住的任务：子文件全部完成、进度≥99.5%，但后端文件夹仍显示"下载中"
+const stuckSeen = new Map<string, number>()
+const stuckTasks = computed(() => {
+  const now = Date.now()
+  const STUCK_AFTER_MS = 30000
+  return displayCards.value.filter(c => {
+    if (!c.isFolder) { stuckSeen.delete(c.id); return false }
+    const raw = (c.rawStatus || '').toLowerCase()
+    const backendActive = ['downloading', 'running', 'active', 'pending'].includes(raw)
+    const done = c.totalCount > 0 && c.doneCount === c.totalCount && c.progress >= 99.5
+    if (backendActive && done) {
+      if (!stuckSeen.has(c.id)) stuckSeen.set(c.id, now)
+      return (now - (stuckSeen.get(c.id) || now)) > STUCK_AFTER_MS
+    }
+    stuckSeen.delete(c.id)
+    return false
+  })
+})
 
 const countByStatus = (status: string) => {
   if (status === 'all') return displayCards.value.length
@@ -793,6 +834,7 @@ onUnmounted(() => {
 .status-count { margin-left: 4px; opacity: 0.7; }
 
 .task-container { display: flex; flex-direction: column; gap: 12px; }
+.stuck-alert { margin-bottom: 12px; }
 .task-list { display: flex; flex-direction: column; gap: 12px; }
 
 .task-card {

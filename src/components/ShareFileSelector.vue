@@ -51,15 +51,12 @@
             <Document v-else />
           </el-icon>
 
-          <span class="file-name" :title="file.name">{{ file.name }}</span>
-
           <span
-            v-if="file.is_dir"
-            class="file-enter"
-            @click="emit('enterFolder', file)"
-          >
-            <el-icon><ArrowRight /></el-icon>
-          </span>
+            class="file-name"
+            :class="{ 'folder-name': file.is_dir }"
+            :title="file.name"
+            @click="file.is_dir && emit('enterFolder', file)"
+          >{{ file.name }}</span>
 
           <span class="file-size">
             {{ file.is_dir ? '文件夹' : formatSize(file.size) }}
@@ -79,7 +76,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { ArrowLeft, ArrowRight, Folder, Document } from '@element-plus/icons-vue'
+import { ArrowLeft, Folder, Document } from '@element-plus/icons-vue'
 import type { ShareFile, ShareInfo } from '../api/share'
 
 const props = defineProps<{
@@ -158,8 +155,8 @@ const formatSize = (bytes: number) => {
 .file-icon { margin: 0 8px; font-size: 18px; color: #409eff; }
 .folder-icon { color: #e6a23c; }
 .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-.file-enter { cursor: pointer; color: #909399; padding: 4px; margin-right: 8px; }
-.file-enter:hover { color: #409eff; }
+.folder-name { cursor: pointer; color: #409eff; }
+.folder-name:hover { text-decoration: underline; }
 .file-size { font-size: 13px; color: #909399; min-width: 80px; text-align: right; }
 .selector-footer { margin-top: 16px; display: flex; justify-content: flex-end; gap: 8px; }
 </style>

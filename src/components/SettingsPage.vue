@@ -167,6 +167,20 @@
           </div>
         </el-form-item>
 
+        <el-alert
+          v-if="dockerPathWarning"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 16px"
+        >
+          <template #title>下载路径可能无法被 Docker 后端访问</template>
+          <div style="font-size: 12px; line-height: 1.6">
+            当前为 Docker 直下模式，但下载目录是 Windows 本机路径（含盘符或反斜杠）。后端运行在容器内，需要填写容器内可访问的绝对路径（例如 <code>/app/downloads</code>，该路径需已挂载到容器）。
+            路径不对会导致文件无法写入、任务卡在"下载中"。
+          </div>
+        </el-alert>
+
         <el-form-item label="最大重试次数" required>
           <el-input-number
             v-model="settings.maxRetry"
@@ -336,6 +350,13 @@ const proxyStatusText = computed(() => {
   if (settings.value.proxyType === 'none') return '● 未配置'
   if (!settings.value.proxyHost) return '● 待配置'
   return `● ${settings.value.proxyType}://${settings.value.proxyHost}:${settings.value.proxyPort}`
+})
+
+// Docker 直下模式下，若下载目录是 Windows 本机路径，则后端容器无法访问，可能导致任务卡在"下载中"
+const dockerPathWarning = computed(() => {
+  if (settings.value.downloadMode !== 'docker') return false
+  const p = settings.value.defaultDownloadPath || ''
+  return /^[a-zA-Z]:[\\/]/.test(p) || /[\\]/.test(p)
 })
 
 const onAuthModeChange = () => {
