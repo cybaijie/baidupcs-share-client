@@ -7,6 +7,9 @@
         <el-tag :type="activeCount > 0 ? 'success' : 'info'" size="large">
           {{ activeCount }} 个任务进行中
         </el-tag>
+        <el-tag v-if="!isPolling" type="warning" size="small" style="margin-left:8px">
+          被动更新
+        </el-tag>
       </div>
       <div class="header-right">
         <div class="sort-control">
@@ -93,7 +96,7 @@
                 <div class="task-path">{{ card.path }}</div>
               </div>
               <div class="task-actions">
-                <el-button size="small" plain type="info" @click="showDetail(card)">
+                <el-button size="small" plain type="info" @click="showDetail(card)" v-if="card.isFolder">
                   <el-icon><Document /></el-icon> 详情
                 </el-button>
                 <template v-if="card.status === 'active'">
@@ -207,7 +210,7 @@
               <template #default="{ row }">
                 <div class="file-name-cell">
                   <el-icon :size="16"><Document /></el-icon>
-                  <span>{{ row.name }}</span>
+                  <span>{{ row.name || extractFileNameFromPath(row.path) || extractFileNameFromPath(row.local_path) || extractFileNameFromPath(row.save_path) || 'file' }}</span>
                 </div>
               </template>
             </el-table-column>
@@ -265,7 +268,15 @@ import {
   Folder, Document, FolderOpened, Search
 } from '@element-plus/icons-vue'
 import { open } from '@tauri-apps/plugin-shell'
-import { downloadApi, type FolderTask, type FileTask, type TransferTask } from '../api/downloads'
+import {
+  downloadApi,
+  markPendingAutoCleanup,
+  getPendingAutoCleanup,
+  removePendingAutoCleanup,
+  type FolderTask,
+  type FileTask,
+  type TransferTask
+} from '../api/downloads'
 
 defineEmits<{ (e: 'go-share-direct'): void }>()
 
@@ -278,6 +289,8 @@ const sortDesc = ref(true)
 const statusFilter = ref('all')
 const loading = ref(false)
 let pollTimer: number | null = null
+let lastActiveTime = Date.now()
+const isPolling = ref(true)
 
 // Detail dialog
 const detailVisible = ref(false)
@@ -307,6 +320,12 @@ interface DisplayCard {
 }
 
 // ==================== Helpers ====================
+function extractFileNameFromPath(path?: string): string {
+  if (!path) return ''
+  const parts = path.split(/[\\/]/)
+  return parts[parts.length - 1] || ''
+}
+
 function mapStatus(raw: string): TaskStatus {
   const s = raw?.toLowerCase() || ''
   if (['downloading', 'running', 'active', 'pending'].includes(s)) return 'active'
@@ -358,6 +377,156 @@ function extractTempRoot(path: string): string | null {
   return m ? m[1] : null
 }
 
+// ==================== Hierarchy Resolution ====================
+function resolveHierarchy(inputId: string) {
+  const matchedTransfers: TransferTask[] = []
+  const matchedFolders: FolderTask[] = []
+  const matchedFiles: FileTask[] = []
+  const rawPaths = new Set<string>()
+
+  // 1. Direct match
+  for (const t of transferTasks.value) {
+    if (t.id === inputId) {
+      matchedTransfers.push(t)
+      if (t.save_path) rawPaths.add(t.save_path)
+      if (t.path) rawPaths.add(t.path)
+    }
+  }
+  for (const f of folderTasks.value) {
+    const fid = f.id || f.folder_id || f.task_id || ''
+    if (fid === inputId) {
+      matchedFolders.push(f)
+      if (f.path) rawPaths.add(f.path)
+      if (f.folder_path) rawPaths.add(f.folder_path)
+      if (f.save_path) rawPaths.add(f.save_path)
+    }
+  }
+  for (const dt of fileTasks.value) {
+    const did = dt.id || dt.task_id || ''
+    if (did === inputId) {
+      matchedFiles.push(dt)
+      if (dt.path) rawPaths.add(dt.path)
+      if (dt.local_path) rawPaths.add(dt.local_path)
+      if (dt.save_path) rawPaths.add(dt.save_path)
+    }
+  }
+
+  // 2. Extract temp root dirs
+  const tempRootDirs = new Set<string>()
+  for (const p of rawPaths) {
+    const m = p.match(/(\/\.bpr_share_temp\/[^/]+)/)
+    if (m) tempRootDirs.add(m[1])
+  }
+
+  // 3. Spread by temp root dirs
+  for (const rootDir of tempRootDirs) {
+    for (const t of transferTasks.value) {
+      const tp = t.save_path || t.path || ''
+      if (tp.includes(rootDir) && !matchedTransfers.find(x => x.id === t.id)) {
+        matchedTransfers.push(t)
+      }
+    }
+    for (const f of folderTasks.value) {
+      const fp = f.path || f.folder_path || f.save_path || ''
+      const fid = f.id || f.folder_id || f.task_id || ''
+      if (fp.includes(rootDir) && !matchedFolders.find(x => (x.id || x.folder_id || x.task_id) === fid)) {
+        matchedFolders.push(f)
+      }
+    }
+    for (const dt of fileTasks.value) {
+      const dp = dt.path || dt.local_path || dt.save_path || ''
+      const did = dt.id || dt.task_id || ''
+      if (dp.includes(rootDir) && !matchedFiles.find(x => (x.id || x.task_id) === did)) {
+        matchedFiles.push(dt)
+      }
+    }
+  }
+
+  // 4. Expand folder sub-files
+  for (const f of matchedFolders) {
+    const fid = f.id || f.folder_id || f.task_id || ''
+    for (const dt of fileTasks.value) {
+      const did = dt.id || dt.task_id || ''
+      if ((dt.group_id === fid || dt.folder_id === fid || dt.parent_task_id === fid) &&
+          !matchedFiles.find(x => (x.id || x.task_id) === did)) {
+        matchedFiles.push(dt)
+      }
+    }
+    for (const sub of (f.sub_tasks || f.files || f.task_ids || [])) {
+      if (typeof sub === 'string') {
+        const found = fileTasks.value.find(dt => (dt.id || dt.task_id) === sub)
+        if (found && !matchedFiles.find(x => (x.id || x.task_id) === sub)) matchedFiles.push(found)
+      } else if (sub && typeof sub === 'object' && sub.id) {
+        const found = fileTasks.value.find(dt => (dt.id || dt.task_id) === sub.id)
+        if (found && !matchedFiles.find(x => (x.id || x.task_id) === sub.id)) matchedFiles.push(found)
+      }
+    }
+  }
+
+  // 5. Expand transfer sub-tasks
+  for (const t of matchedTransfers) {
+    for (const sub of (t as any).sub_tasks || []) {
+      if (sub && typeof sub === 'object' && sub.id) {
+        const found = fileTasks.value.find(dt => (dt.id || dt.task_id) === sub.id)
+        if (found && !matchedFiles.find(x => (x.id || x.task_id) === sub.id)) matchedFiles.push(found)
+      }
+    }
+  }
+
+  const allCleanPaths = Array.from(new Set([...rawPaths, ...tempRootDirs]))
+
+  return {
+    transfers: matchedTransfers,
+    folders: matchedFolders,
+    files: matchedFiles,
+    savePaths: allCleanPaths,
+    tempRootDirs: Array.from(tempRootDirs)
+  }
+}
+
+// ==================== Deep Delete ====================
+async function executeDeepDelete(inputId: string, deleteLocalFiles: boolean) {
+  const tree = resolveHierarchy(inputId)
+
+  // Pause
+  for (const f of tree.folders) {
+    const fid = f.id || f.folder_id || f.task_id || ''
+    if (fid) await downloadApi.pauseFolder(fid)
+  }
+  for (const f of tree.files) {
+    const fid = f.id || f.task_id || ''
+    if (fid) await downloadApi.pauseFile(fid)
+  }
+
+  // Delete folder tasks
+  for (const f of tree.folders) {
+    const fid = f.id || f.folder_id || f.task_id || ''
+    if (fid) {
+      if (deleteLocalFiles) await downloadApi.deleteFolder(fid)
+      else await downloadApi.deleteFolderRecordOnly(fid)
+    }
+  }
+
+  // Delete file tasks
+  for (const f of tree.files) {
+    const fid = f.id || f.task_id || ''
+    if (fid) {
+      if (deleteLocalFiles) await downloadApi.deleteFile(fid)
+      else await downloadApi.deleteFileRecordOnly(fid)
+    }
+  }
+
+  // Delete transfers
+  for (const t of tree.transfers) {
+    if (t.id) await downloadApi.deleteTransfer(t.id)
+  }
+
+  // Clean netdisk temp dirs
+  if (tree.tempRootDirs.length > 0) {
+    await downloadApi.deleteNetdiskFiles(tree.tempRootDirs)
+  }
+}
+
 // ==================== Computed ====================
 const displayCards = computed((): DisplayCard[] => {
   const cards: DisplayCard[] = []
@@ -390,7 +559,7 @@ const displayCards = computed((): DisplayCard[] => {
 
     cards.push({
       id: folder.id,
-      name: folder.name || 'folder',
+      name: folder.name || folder.folder_name || extractFileNameFromPath(folder.path) || extractFileNameFromPath(folder.folder_path) || extractFileNameFromPath(folder.save_path) || 'folder',
       status: effStatus,
       rawStatus: folder.status,
       path: folder.path || '',
@@ -419,7 +588,7 @@ const displayCards = computed((): DisplayCard[] => {
     const progress = ftot > 0 ? (fdl / ftot) * 100 : 0
     cards.push({
       id: file.id,
-      name: file.name || 'file',
+      name: file.name || file.filename || extractFileNameFromPath(file.path) || extractFileNameFromPath(file.local_path) || extractFileNameFromPath(file.save_path) || 'file',
       status: mapStatus(file.status),
       rawStatus: file.status,
       path: file.path || '',
@@ -480,8 +649,64 @@ const detailFiles = computed(() => {
 const filteredDetailFiles = computed(() => {
   if (!detailSearch.value) return detailFiles.value
   const kw = detailSearch.value.toLowerCase()
-  return detailFiles.value.filter(f => (f.name || '').toLowerCase().includes(kw))
+  return detailFiles.value.filter(f => {
+    const name = (f.name || extractFileNameFromPath(f.path) || extractFileNameFromPath(f.local_path) || extractFileNameFromPath(f.save_path) || '').toLowerCase()
+    return name.includes(kw)
+  })
 })
+
+// ==================== Polling ====================
+const startPolling = () => {
+  if (pollTimer) return
+  isPolling.value = true
+  pollTimer = window.setInterval(async () => {
+    await fetchAll()
+    const hasActive = displayCards.value.some(c => c.status === 'active')
+    if (hasActive) {
+      lastActiveTime = Date.now()
+    } else if (Date.now() - lastActiveTime > 60000) {
+      if (pollTimer) {
+        clearInterval(pollTimer)
+        pollTimer = null
+        isPolling.value = false
+      }
+    }
+  }, 3000)
+}
+
+const stopPolling = () => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+  isPolling.value = false
+}
+
+// ==================== Auto Cleanup ====================
+const checkAutoCleanup = async () => {
+  const pending = getPendingAutoCleanup()
+  if (pending.length === 0) return
+
+  for (const taskId of pending) {
+    const tree = resolveHierarchy(taskId)
+
+    const allCompleted = tree.folders.every(f => {
+      const status = f.status?.toLowerCase() || ''
+      return ['completed', 'done', 'finished', 'success'].includes(status)
+    }) && tree.files.every(f => {
+      const status = f.status?.toLowerCase() || ''
+      return ['completed', 'done', 'finished', 'success'].includes(status)
+    })
+
+    const noTasks = tree.folders.length === 0 && tree.files.length === 0 && tree.transfers.length === 0
+
+    if (allCompleted || noTasks) {
+      await executeDeepDelete(taskId, false)
+      removePendingAutoCleanup(taskId)
+      ElMessage.success(`任务 ${taskId.slice(0, 8)}... 已完成，网盘临时文件已自动清理`)
+    }
+  }
+}
 
 // ==================== Actions ====================
 const fetchAll = async () => {
@@ -495,10 +720,15 @@ const fetchAll = async () => {
   fileTasks.value = files
   transferTasks.value = transfers
   loading.value = false
+  await checkAutoCleanup()
 }
 
 const refreshTasks = () => {
   fetchAll()
+  if (!isPolling.value) {
+    lastActiveTime = Date.now()
+    startPolling()
+  }
   ElMessage.success('任务列表已刷新')
 }
 
@@ -520,25 +750,30 @@ const handleResume = async (card: DisplayCard) => {
   } else {
     await downloadApi.resumeFile(card.id)
   }
+  lastActiveTime = Date.now()
+  startPolling()
   ElMessage.success('已开始')
   fetchAll()
 }
 
 const handleDelete = async (card: DisplayCard) => {
   try {
-    await ElMessageBox.confirm('确定删除该任务吗？', '提示', { type: 'warning' })
-    if (card.isFolder) {
-      await downloadApi.pauseFolder(card.id)
-      for (const f of card.subFiles) await downloadApi.pauseFile(f.id)
-      await downloadApi.deleteFolder(card.id)
-      for (const f of card.subFiles) await downloadApi.deleteFile(f.id)
-      if (card.transferId) await downloadApi.deleteTransfer(card.transferId)
-      const tempRoot = extractTempRoot(card.path)
-      if (tempRoot) await downloadApi.deleteNetdiskFiles([tempRoot])
-    } else {
-      await downloadApi.pauseFile(card.id)
-      await downloadApi.deleteFile(card.id)
+    const tree = resolveHierarchy(card.id)
+    const names = [
+      ...tree.folders.map(f => f.name || f.folder_name || extractFileNameFromPath(f.path) || '文件夹'),
+      ...tree.files.map(f => f.name || f.filename || extractFileNameFromPath(f.path) || '文件')
+    ]
+    const displayNames = names.slice(0, 5)
+    const moreCount = names.length - 5
+    let msg = `确定删除该任务吗？`
+    if (displayNames.length > 0) {
+      msg += '\n\n' + displayNames.map(n => `• ${n}`).join('\n')
+      if (moreCount > 0) msg += `\n... 还有 ${moreCount} 个`
     }
+    msg += '\n\n⚠️ 本地文件也将被删除'
+
+    await ElMessageBox.confirm(msg, '确认删除', { type: 'warning' })
+    await executeDeepDelete(card.id, true)
     ElMessage.success('任务已删除')
     fetchAll()
   } catch { /* cancel */ }
@@ -573,20 +808,33 @@ const batchResume = async () => {
 }
 
 const batchDelete = async () => {
+  const cards = displayCards.value
+  if (cards.length === 0) {
+    ElMessage.info('没有可删除的任务')
+    return
+  }
+
+  const allNames: string[] = []
+  for (const card of cards) {
+    const tree = resolveHierarchy(card.id)
+    const names = [
+      ...tree.folders.map(f => f.name || f.folder_name || extractFileNameFromPath(f.path) || '文件夹'),
+      ...tree.files.map(f => f.name || f.filename || extractFileNameFromPath(f.path) || '文件')
+    ]
+    allNames.push(...names)
+  }
+
+  const displayNames = allNames.slice(0, 5)
+  const moreCount = allNames.length - 5
+  let msg = `确定批量删除 ${allNames.length} 个任务吗？`
+  msg += '\n\n' + displayNames.map(n => `• ${n}`).join('\n')
+  if (moreCount > 0) msg += `\n... 还有 ${moreCount} 个`
+  msg += '\n\n⚠️ 本地文件也将被删除'
+
   try {
-    await ElMessageBox.confirm('确定删除所有任务吗？', '提示', { type: 'warning' })
-    for (const card of displayCards.value) {
-      if (card.isFolder) {
-        await downloadApi.pauseFolder(card.id)
-        await downloadApi.deleteFolder(card.id)
-        for (const f of card.subFiles) await downloadApi.deleteFile(f.id)
-        if (card.transferId) await downloadApi.deleteTransfer(card.transferId)
-        const tempRoot = extractTempRoot(card.path)
-        if (tempRoot) await downloadApi.deleteNetdiskFiles([tempRoot])
-      } else {
-        await downloadApi.pauseFile(card.id)
-        await downloadApi.deleteFile(card.id)
-      }
+    await ElMessageBox.confirm(msg, '确认批量删除', { type: 'warning' })
+    for (const card of cards) {
+      await executeDeepDelete(card.id, true)
     }
     ElMessage.success('所有任务已删除')
     fetchAll()
@@ -594,21 +842,26 @@ const batchDelete = async () => {
 }
 
 const clearCompleted = async () => {
-  for (const card of displayCards.value.filter(c => c.status === 'completed')) {
-    if (card.isFolder) {
-      await downloadApi.deleteFolder(card.id)
-      for (const f of card.subFiles) await downloadApi.deleteFile(f.id)
-      if (card.transferId) await downloadApi.deleteTransfer(card.transferId)
-    } else {
-      await downloadApi.deleteFile(card.id)
-    }
+  const completed = displayCards.value.filter(c => c.status === 'completed')
+  if (completed.length === 0) {
+    ElMessage.info('没有已完成的任务')
+    return
   }
-  ElMessage.success('已清除已完成任务')
-  fetchAll()
+  try {
+    await ElMessageBox.confirm(`确定清除 ${completed.length} 个已完成任务吗？\n\n✓ 本地文件将保留`, '确认清除', { type: 'info' })
+    for (const card of completed) {
+      await executeDeepDelete(card.id, false)
+    }
+    ElMessage.success('已清除已完成任务')
+    fetchAll()
+  } catch {}
 }
 
-onMounted(() => { fetchAll(); pollTimer = window.setInterval(fetchAll, 3000) })
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onMounted(() => {
+  fetchAll()
+  startPolling()
+})
+onUnmounted(() => { stopPolling() })
 </script>
 
 <style scoped>
