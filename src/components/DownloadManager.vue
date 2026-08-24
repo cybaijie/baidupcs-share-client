@@ -677,8 +677,9 @@ const handleAutoDelete = async () => {
         return d && ['completed', 'done', 'finished'].includes(d.status)
       })
       if (anyDone || fileDone) {
-        // 收集转存记录 ID（同时通过文件夹的 transfer_id/source_id 关联兜底）
+        // 收集转存记录 ID（同时通过 taskId 与文件夹的 transfer_id/source_id 关联兜底）
         const transferIds = new Set(transfers)
+        if (taskId) transferIds.add(taskId)
         for (const fid of folders) {
           const f = folderTasks.value.find(x => x.id === fid)
           if (f?.transfer_id) transferIds.add(f.transfer_id)

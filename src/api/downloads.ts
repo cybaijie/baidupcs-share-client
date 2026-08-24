@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { useSettingsStore } from '../stores/settings'
+import { tryRefreshStoredToken } from './auth'
 
 function getClient() {
   const store = useSettingsStore()
@@ -18,8 +19,18 @@ function getClient() {
   })
   client.interceptors.response.use(
     (response) => response,
-    (error) => {
+    async (error) => {
+      const cfg = error.config as (typeof error.config & { _retry?: boolean }) | undefined
       if (error.response?.status === 419) {
+        // 自动用 refresh_token 续期后重试一次，避免频繁“认证已过期，请重新登录”
+        if (cfg && !cfg._retry) {
+          cfg._retry = true
+          const ok = await tryRefreshStoredToken()
+          if (ok) {
+            cfg.headers.Authorization = `Bearer ${useSettingsStore().config.token}`
+            return client(cfg)
+          }
+        }
         return Promise.reject(new Error('认证已过期，请重新登录'))
       }
       if (error.response?.status === 401) {

@@ -8,6 +8,7 @@ export interface AppConfig {
   password: string
   totpSecret: string
   token: string
+  refreshToken: string
   defaultDownloadPath: string
   savePassword: boolean
   askEveryTime: boolean
@@ -27,6 +28,7 @@ const DEFAULTS: AppConfig = {
   password: '',
   totpSecret: '',
   token: '',
+  refreshToken: '',
   defaultDownloadPath: './downloads',
   savePassword: false,
   askEveryTime: false,

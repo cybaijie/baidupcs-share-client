@@ -2,6 +2,7 @@ import axios from 'axios'
 
 export interface LoginResult {
   token: string
+  refreshToken?: string
   viaFallback?: boolean
 }
 
@@ -14,18 +15,63 @@ function getClient(serverUrl: string) {
   })
 }
 
-function extractToken(data: any): string | null {
+/**
+ * 从登录/刷新响应中提取 access_token 与 refresh_token。
+ * 后端 /web-auth/login 返回的是 { status, access_token, refresh_token, ... }（顶层）。
+ */
+function extractTokens(data: any): { token: string; refreshToken?: string } | null {
   if (!data) return null
-  const candidates = [
-    data.data?.token,
-    data.data?.access_token,
-    data.access_token,
-    data.token,
-  ]
-  for (const t of candidates) {
-    if (t) return t
+  const top = typeof data === 'object' ? data : {}
+  const inner = top.data && typeof top.data === 'object' ? top.data : {}
+  const token = top.access_token || inner.access_token || top.token || inner.token
+  if (!token) return null
+  const refreshToken = top.refresh_token || inner.refresh_token
+  return { token, refreshToken: refreshToken || undefined }
+}
+
+/**
+ * 使用 refresh_token 刷新 access_token（后端 /web-auth/refresh）。
+ * access_token 有效期仅 15 分钟，需用 refresh_token（7 天）续期，否则频繁 419。
+ */
+export async function refreshAccessToken(
+  serverUrl: string,
+  refreshToken: string
+): Promise<{ token: string; refreshToken?: string } | null> {
+  try {
+    const base = serverUrl.replace(/\/+$/, '')
+    const r = await axios.post(
+      `${base}/api/v1/web-auth/refresh`,
+      { refresh_token: refreshToken },
+      { timeout: 15000 }
+    )
+    const tokens = extractTokens(r.data)
+    return tokens
+  } catch {
+    return null
   }
-  return null
+}
+
+/**
+ * 读取已保存的 refresh_token 续期 access_token，并写回设置。
+ * 用于 419（认证已过期）时自动刷新后重试，避免频繁要求重新登录。
+ */
+export async function tryRefreshStoredToken(): Promise<boolean> {
+  try {
+    const { useSettingsStore } = await import('../stores/settings')
+    const store = useSettingsStore()
+    const rt = store.config.refreshToken
+    if (!rt) return false
+    const result = await refreshAccessToken(store.baseURL, rt)
+    if (result) {
+      store.config.token = result.token
+      if (result.refreshToken) store.config.refreshToken = result.refreshToken
+      store.save()
+      return true
+    }
+  } catch {
+    // ignore
+  }
+  return false
 }
 
 export async function verifyNoAuth(serverUrl: string): Promise<void> {
@@ -63,8 +109,8 @@ export async function loginWithPassword(serverUrl: string, password: string): Pr
       const res = await client.post(ep.path, ep.payload)
       const data = res.data
       if (data.code === 0 || data.status === 'success' || data.status === 'ok') {
-        const token = extractToken(data)
-        if (token) return { token }
+        const tokens = extractTokens(data)
+        if (tokens) return { token: tokens.token, refreshToken: tokens.refreshToken }
       }
     } catch (e: any) {
       // 与 Python 脚本一致：任何异常（405/404/网络错误等）都继续尝试下一个端点
@@ -94,8 +140,8 @@ export async function loginWith2FA(serverUrl: string, password: string, code: st
       const res = await client.post(ep.path, ep.payload)
       const data = res.data
       if (data.code === 0 || data.status === 'success' || data.status === 'ok') {
-        const token = extractToken(data)
-        if (token) return { token }
+        const tokens = extractTokens(data)
+        if (tokens) return { token: tokens.token, refreshToken: tokens.refreshToken }
       }
     } catch (e: any) {
       continue
@@ -122,8 +168,8 @@ export async function loginWith2FAOnly(serverUrl: string, code: string): Promise
       const res = await client.post(ep.path, ep.payload)
       const data = res.data
       if (data.code === 0 || data.status === 'success' || data.status === 'ok') {
-        const token = extractToken(data)
-        if (token) return { token }
+        const tokens = extractTokens(data)
+        if (tokens) return { token: tokens.token, refreshToken: tokens.refreshToken }
       }
     } catch (e: any) {
       continue

@@ -427,6 +427,7 @@ const handleLogin = async () => {
     }
 
     settingsStore.config.token = result.token
+    settingsStore.config.refreshToken = result.refreshToken || ''
     if (settingsStore.config.savePassword) {
       settingsStore.config.password = loginForm.password
     } else {
@@ -452,6 +453,7 @@ const handleLogin = async () => {
 
 const handleLogout = () => {
   settingsStore.config.token = ''
+  settingsStore.config.refreshToken = ''
   if (!settingsStore.config.savePassword) {
     settingsStore.config.password = ''
     loginForm.password = ''

@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { useSettingsStore } from '../stores/settings'
+import { tryRefreshStoredToken } from './auth'
 
 function getClient() {
   const store = useSettingsStore()
@@ -20,8 +21,17 @@ function getClient() {
 
   client.interceptors.response.use(
     (response) => response,
-    (error) => {
+    async (error) => {
+      const cfg = error.config as (typeof error.config & { _retry?: boolean }) | undefined
       if (error.response?.status === 419) {
+        if (cfg && !cfg._retry) {
+          cfg._retry = true
+          const ok = await tryRefreshStoredToken()
+          if (ok) {
+            cfg.headers.Authorization = `Bearer ${useSettingsStore().config.token}`
+            return client(cfg)
+          }
+        }
         return Promise.reject(new Error('认证已过期，请重新登录'))
       }
       if (error.response?.status === 401) {
@@ -108,15 +118,14 @@ export const shareApi = {
     selected_fs_ids?: number[]
     selected_paths?: string[]
     file_list?: any[]
+    selected_files?: {
+      fs_id: number
+      is_dir: boolean
+      path: string
+      size: number
+      name: string
+    }[]
     auto_delete?: boolean
-    // 选中子文件夹内文件转存时，后端需要源目录与分享鉴权信息来解析 fs_id
-    dir?: string
-    short_key?: string
-    shareid?: string
-    uk?: string
-    bdstoken?: string
-    kind?: string
-    token?: string
   }): Promise<TransferResponse> {
     return getClient().post('/transfers', data).then(r => {
       const body = r.data as ApiResponse
