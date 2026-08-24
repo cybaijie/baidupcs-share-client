@@ -89,10 +89,49 @@ function isJwtExpired(token: string): boolean {
 }
 
 /**
- * 启动时确保已认证：
- * 1) 有 refresh_token → 优先续期；
- * 2) 无 refresh_token 但 token 已过期/缺失，且保存了密码（记住密码）→ 自动登录一次；
- * 3) token 仍有效 → 直接沿用，不重复登录。
+ * 用当前 token 主动向后端发起一个需要认证的请求验证其有效性。
+ * 返回是否有效。无效（419）时尝试刷新或自动登录。
+ */
+async function verifyAndRenewToken(): Promise<void> {
+  const { useSettingsStore } = await import('../stores/settings')
+  const store = useSettingsStore()
+  const token = store.config.token
+  if (!token) return
+
+  try {
+    const client = axios.create({ baseURL: `${store.baseURL}/api/v1`, timeout: 8000 })
+    client.interceptors.request.use((c) => {
+      c.headers.Authorization = `Bearer ${token}`
+      return c
+    })
+    await client.get('/transfers')
+    // 200：token 有效
+  } catch (e: any) {
+    if (e.response?.status === 419) {
+      // token 无效 → 先刷新；刷新失败且有密码则自动登录
+      if (!(await tryRefreshStoredToken())) {
+        const { useSettingsStore: useStore2 } = await import('../stores/settings')
+        const s2 = useStore2()
+        const mode = s2.config.authMode
+        if ((mode === 'password' || mode === 'password_2fa') && s2.config.password) {
+          const result = await loginWithPassword(s2.baseURL, s2.config.password)
+          if (result && !result.viaFallback) {
+            s2.config.token = result.token
+            if (result.refreshToken) s2.config.refreshToken = result.refreshToken
+            s2.save()
+          }
+        }
+      }
+    }
+    // 网络错误/其它 → 忽略，交由后续请求的 419 拦截器处理
+  }
+}
+
+/**
+ * 启动时确保已认证并主动验证 token：
+ * 1) 有 refresh_token → 先续期；
+ * 2) 无 refresh_token 但 token 过期/缺失且保存密码 → 自动登录；
+ * 3) 主动向后端验证 token，无效则刷新或自动登录，避免首屏即报"认证已过期"。
  */
 export async function ensureAuthenticated(): Promise<void> {
   try {
@@ -100,8 +139,10 @@ export async function ensureAuthenticated(): Promise<void> {
     const store = useSettingsStore()
     const mode = store.config.authMode
 
+    // 1) 有 refresh_token → 先续期
     if (store.config.refreshToken && (await tryRefreshStoredToken())) return
 
+    // 2) 无 refresh_token 且 token 过期/缺失，且保存密码 → 自动登录
     const token = store.config.token
     const password = store.config.password
     if ((mode === 'password' || mode === 'password_2fa') && password && (!token || isJwtExpired(token))) {
@@ -112,6 +153,9 @@ export async function ensureAuthenticated(): Promise<void> {
         store.save()
       }
     }
+
+    // 3) 主动验证 token 是否有效，无效则刷新/自动登录
+    await verifyAndRenewToken()
   } catch {
     // ignore
   }

@@ -95,6 +95,10 @@ const emit = defineEmits<{
 
 const isAllSelected = ref(false)
 
+// 跨文件夹持久勾选：fs_id -> 文件信息(含 selected)
+// 进入子文件夹后仍保留父目录已勾选项，下载时合并全部勾选
+const selectionMap = ref<Record<number, ShareFile>>({})
+
 const breadcrumbs = computed(() => {
   const parts = props.currentPath.split('/').filter(Boolean)
   return parts.map((name, index) => ({
@@ -103,27 +107,51 @@ const breadcrumbs = computed(() => {
   }))
 })
 
-const selectedCount = computed(() => props.files.filter(f => f.selected).length)
-const selectedSize = computed(() =>
-  props.files
-    .filter(f => f.selected && !f.is_dir)
-    .reduce((sum, f) => sum + (f.size || 0), 0)
+// 合并所有文件夹下已勾选项（含当前未显示的父目录项）
+const selectedItems = computed(() =>
+  Object.values(selectionMap.value).filter(f => f.selected)
 )
+
+const selectedCount = computed(() => selectedItems.value.length)
+const selectedSize = computed(() =>
+  selectedItems.value.filter(f => !f.is_dir).reduce((sum, f) => sum + (f.size || 0), 0)
+)
+
+// 上报合并后的全部勾选项
+function emitSelection() {
+  emit('selectionChange', selectedItems.value.map(f => ({ ...f })))
+}
 
 watch(() => props.files, (newFiles) => {
   isAllSelected.value = newFiles.length > 0 && newFiles.every(f => f.selected)
-  // 进入文件夹/切换文件列表后立即上报当前勾选，避免父组件认为未选择任何文件
-  emit('selectionChange', newFiles.filter(f => f.selected))
+  for (const f of newFiles) {
+    if (selectionMap.value[f.fs_id]) {
+      // 恢复跨文件夹的勾选状态
+      f.selected = !!selectionMap.value[f.fs_id].selected
+    } else {
+      // 新出现的项：默认全选，并记录
+      f.selected = true
+      selectionMap.value[f.fs_id] = { ...f, selected: true }
+    }
+  }
+  emitSelection()
 }, { immediate: true })
 
 const handleSelectAll = (val: boolean) => {
-  props.files.forEach(f => f.selected = val)
-  emit('selectionChange', props.files.filter(f => f.selected))
+  for (const f of props.files) {
+    f.selected = val
+    selectionMap.value[f.fs_id] = { ...f, selected: val }
+  }
+  isAllSelected.value = val
+  emitSelection()
 }
 
 const handleItemChange = () => {
   isAllSelected.value = props.files.every(f => f.selected)
-  emit('selectionChange', props.files.filter(f => f.selected))
+  for (const f of props.files) {
+    selectionMap.value[f.fs_id] = { ...f, selected: f.selected }
+  }
+  emitSelection()
 }
 
 const goRoot = () => emit('enterFolder', { path: '/' })
