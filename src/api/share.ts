@@ -106,6 +106,8 @@ export const shareApi = {
     local_download_path?: string
     is_share_direct_download?: boolean
     selected_fs_ids?: number[]
+    selected_paths?: string[]
+    file_list?: any[]
     auto_delete?: boolean
     // 选中子文件夹内文件转存时，后端需要源目录与分享鉴权信息来解析 fs_id
     dir?: string

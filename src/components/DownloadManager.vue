@@ -470,7 +470,7 @@ function showBatchDeleteConfirm(cards: DisplayCard[]) {
 }
 
 // ==================== Computed ====================
-const displayCards = computed((): DisplayCard[] => {
+function buildCards(): DisplayCard[] {
   const cards: DisplayCard[] = []
 
   // Folder cards
@@ -555,10 +555,17 @@ const displayCards = computed((): DisplayCard[] => {
     })
   }
 
+  return cards
+}
+
+// 未经过滤/排序的全部卡片（批量操作作用于全部任务，不受状态筛选影响）
+const allCards = computed((): DisplayCard[] => buildCards())
+
+const displayCards = computed((): DisplayCard[] => {
   // Filter
   let list = statusFilter.value === 'all'
-    ? cards
-    : cards.filter(c => c.status === statusFilter.value)
+    ? allCards.value
+    : allCards.value.filter(c => c.status === statusFilter.value)
 
   // Sort
   list = [...list].sort((a, b) => {
@@ -580,7 +587,7 @@ const displayCards = computed((): DisplayCard[] => {
   return list
 })
 
-const activeCount = computed(() => displayCards.value.filter(c => c.status === 'active').length)
+const activeCount = computed(() => allCards.value.filter(c => c.status === 'active').length)
 
 // 检测后端疑似卡住的任务：子文件全部完成、进度≥99.5%，但后端文件夹仍显示"下载中"
 const stuckSeen = new Map<string, number>()
@@ -602,8 +609,8 @@ const stuckTasks = computed(() => {
 })
 
 const countByStatus = (status: string) => {
-  if (status === 'all') return displayCards.value.length
-  return displayCards.value.filter(c => c.status === status).length
+  if (status === 'all') return allCards.value.length
+  return allCards.value.filter(c => c.status === status).length
 }
 
 const detailFiles = computed(() => {
@@ -670,7 +677,14 @@ const handleAutoDelete = async () => {
         return d && ['completed', 'done', 'finished'].includes(d.status)
       })
       if (anyDone || fileDone) {
-        for (const tid of transfers) await downloadApi.deleteTransfer(tid)
+        // 收集转存记录 ID（同时通过文件夹的 transfer_id/source_id 关联兜底）
+        const transferIds = new Set(transfers)
+        for (const fid of folders) {
+          const f = folderTasks.value.find(x => x.id === fid)
+          if (f?.transfer_id) transferIds.add(f.transfer_id)
+          if (f?.source_id) transferIds.add(f.source_id)
+        }
+        for (const tid of transferIds) await downloadApi.deleteTransfer(tid)
         if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
         takeAutoDelete(taskId)
         cleaned = true
@@ -733,19 +747,21 @@ const showDetail = (card: DisplayCard) => {
 
 // Batch
 const batchPause = async () => {
-  for (const card of displayCards.value.filter(c => c.status === 'active')) {
+  // 只暂停正在下载的任务（对所有任务生效，不受当前状态筛选影响）
+  for (const card of allCards.value.filter(c => c.status === 'active')) {
     await handlePause(card)
   }
 }
 
 const batchResume = async () => {
-  for (const card of displayCards.value.filter(c => c.status === 'waiting' || c.status === 'failed')) {
+  // 只继续已暂停的任务（对所有任务生效）
+  for (const card of allCards.value.filter(c => c.status === 'waiting')) {
     await handleResume(card)
   }
 }
 
 const batchDelete = async () => {
-  const cards = displayCards.value
+  const cards = allCards.value
   if (cards.length === 0) {
     ElMessage.info('没有可删除的任务')
     return
@@ -761,25 +777,23 @@ const batchDelete = async () => {
 }
 
 const clearCompleted = async () => {
-  const completed = displayCards.value.filter(c => c.status === 'completed')
+  const completed = allCards.value.filter(c => c.status === 'completed')
   if (completed.length === 0) {
     ElMessage.info('没有已完成任务')
     return
   }
   try {
     await ElMessageBox.confirm(
-      `确定清除 ${completed.length} 个已完成任务吗？\n将保留本地已下载文件，仅清理下载记录、转存记录与网盘临时文件。`,
+      `确定清除 ${completed.length} 个已完成任务吗？\n仅删除下载管理里的记录，不删除本地已下载文件，也不清理转存记录/网盘临时文件。`,
       '清除已完成',
       { type: 'warning', confirmButtonText: '清除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
     )
     for (const card of completed) {
-      const { folders, files, transfers, tempRoots } = resolveHierarchy(card.id)
+      const { folders, files } = resolveHierarchy(card.id)
       for (const fid of folders) await downloadApi.removeFolderRecord(fid)
       for (const did of files) await downloadApi.removeFileRecord(did)
-      for (const tid of transfers) await downloadApi.deleteTransfer(tid)
-      if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
     }
-    ElMessage.success('已清除已完成任务（保留本地文件）')
+    ElMessage.success('已清除已完成任务（保留本地文件及转存/网盘记录）')
     fetchAll()
   } catch { /* cancel */ }
 }

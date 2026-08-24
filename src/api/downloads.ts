@@ -241,7 +241,21 @@ export const downloadApi = {
 
   // --- Transfer Control ---
   async deleteTransfer(id: string): Promise<boolean> {
-    try { await getClient().delete(`/transfers/${id}`); return true } catch { return false }
+    if (!id) return false
+    const eps = [
+      { m: 'delete' as const, u: `/transfers/${id}` },
+      { m: 'post' as const, u: `/transfers/${id}/delete`, d: {} },
+      { m: 'post' as const, u: `/transfers/${id}/cancel`, d: {} },
+      { m: 'delete' as const, u: `/transfers/${id}?force=true` },
+    ]
+    for (const ep of eps) {
+      try {
+        if (ep.m === 'delete') await getClient().delete(ep.u)
+        else await getClient().post(ep.u, ep.d)
+        return true
+      } catch { continue }
+    }
+    return false
   },
 
   // --- Record removal WITHOUT deleting local files (used by 清除已完成) ---
