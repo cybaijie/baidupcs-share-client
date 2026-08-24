@@ -264,7 +264,10 @@ export const downloadApi = {
         if (ep.m === 'delete') await getClient().delete(ep.u)
         else await getClient().post(ep.u, ep.d)
         return true
-      } catch { continue }
+      } catch (e: any) {
+        console.error('删除转存记录失败:', ep.u, e?.response?.status || e?.message || e)
+        continue
+      }
     }
     return false
   },

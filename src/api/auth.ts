@@ -74,6 +74,49 @@ export async function tryRefreshStoredToken(): Promise<boolean> {
   return false
 }
 
+/**
+ * 判断 access_token(JWT) 是否已过期。非 JWT 视为已过期。
+ */
+function isJwtExpired(token: string): boolean {
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return true
+    const json = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
+    return json.exp ? json.exp * 1000 < Date.now() : true
+  } catch {
+    return true
+  }
+}
+
+/**
+ * 启动时确保已认证：
+ * 1) 有 refresh_token → 优先续期；
+ * 2) 无 refresh_token 但 token 已过期/缺失，且保存了密码（记住密码）→ 自动登录一次；
+ * 3) token 仍有效 → 直接沿用，不重复登录。
+ */
+export async function ensureAuthenticated(): Promise<void> {
+  try {
+    const { useSettingsStore } = await import('../stores/settings')
+    const store = useSettingsStore()
+    const mode = store.config.authMode
+
+    if (store.config.refreshToken && (await tryRefreshStoredToken())) return
+
+    const token = store.config.token
+    const password = store.config.password
+    if ((mode === 'password' || mode === 'password_2fa') && password && (!token || isJwtExpired(token))) {
+      const result = await loginWithPassword(store.baseURL, password)
+      if (result && !result.viaFallback) {
+        store.config.token = result.token
+        if (result.refreshToken) store.config.refreshToken = result.refreshToken
+        store.save()
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export async function verifyNoAuth(serverUrl: string): Promise<void> {
   const client = getClient(serverUrl)
   try {
@@ -96,10 +139,11 @@ export async function verifyNoAuth(serverUrl: string): Promise<void> {
 
 export async function loginWithPassword(serverUrl: string, password: string): Promise<LoginResult> {
   const client = getClient(serverUrl)
+  // web-auth/login 是本后端 Web 访问密码认证的正式端点，返回 access_token + refresh_token
   const endpoints = [
-    { path: 'auth/login', payload: { password } },
     { path: 'web-auth/login', payload: { password } },
     { path: 'auth/web-login', payload: { password } },
+    { path: 'auth/login', payload: { password } },
     { path: 'login', payload: { password } },
     { path: 'auth', payload: { password } },
   ]
