@@ -112,6 +112,8 @@ const selectedSize = computed(() =>
 
 watch(() => props.files, (newFiles) => {
   isAllSelected.value = newFiles.length > 0 && newFiles.every(f => f.selected)
+  // 进入文件夹/切换文件列表后立即上报当前勾选，避免父组件认为未选择任何文件
+  emit('selectionChange', newFiles.filter(f => f.selected))
 }, { immediate: true })
 
 const handleSelectAll = (val: boolean) => {

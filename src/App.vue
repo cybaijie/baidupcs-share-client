@@ -18,20 +18,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import DownloadManager from './components/DownloadManager.vue'
 import ShareDirectPage from './components/ShareDirectPage.vue'
 import SettingsPage from './components/SettingsPage.vue'
-import { useSettingsStore } from './stores/settings'
 
 type PageType = 'downloads' | 'share-direct' | 'settings'
 const currentPage = ref<PageType>('downloads')
-const settingsStore = useSettingsStore()
-
-onMounted(() => {
-  settingsStore.load()
-})
 
 function handleNavigate(page: string) {
   currentPage.value = page as PageType

@@ -120,11 +120,6 @@
                     <el-icon><VideoPlay /></el-icon> 继续
                   </el-button>
                 </template>
-                <template v-else-if="card.status === 'completed'">
-                  <el-button size="small" type="success" @click="handleOpenFolder(card)">
-                    <el-icon><FolderOpened /></el-icon> 打开文件夹
-                  </el-button>
-                </template>
                 <el-button size="small" type="danger" @click="handleDelete(card)">
                   <el-icon><Delete /></el-icon> 删除
                 </el-button>
@@ -276,9 +271,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Sort, Refresh, Link, ArrowDown,
   VideoPause, VideoPlay, Delete,
-  Folder, Document, FolderOpened, Search
+  Folder, Document, Search
 } from '@element-plus/icons-vue'
-import { open } from '@tauri-apps/plugin-shell'
 import { downloadApi, type FolderTask, type FileTask, type TransferTask } from '../api/downloads'
 import { wsMessageCount } from '../api/websocket'
 import { useSettingsStore } from '../stores/settings'
@@ -728,14 +722,8 @@ const handleDelete = async (card: DisplayCard) => {
   } catch { /* cancel */ }
 }
 
-const handleOpenFolder = async (card: DisplayCard) => {
-  const path = card.localPath || card.path
-  if (!path) return
-  try {
-    await open(path)
-  } catch (e: any) {
-    ElMessage.error('无法打开文件夹: ' + (e.message || '未知错误'))
-  }
+const handleOpenFolder = async () => {
+  // “打开文件夹”已从界面隐藏，函数保留以备将来需要时恢复
 }
 
 const showDetail = (card: DisplayCard) => {

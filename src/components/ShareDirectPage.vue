@@ -309,7 +309,14 @@ const handleStartDownload = async () => {
       local_download_path: form.savePath,
       is_share_direct_download: true,
       selected_fs_ids: selectedFiles.value.map((f) => f.fs_id),
-      auto_delete: form.autoDelete
+      auto_delete: form.autoDelete,
+      dir: currentPath.value,
+      short_key: shareInfo.value?.short_key,
+      shareid: shareInfo.value?.shareid,
+      uk: shareInfo.value?.uk,
+      bdstoken: shareInfo.value?.bdstoken,
+      kind: shareInfo.value?.kind,
+      token: shareInfo.value?.token,
     })
     result.value = {
       success: true,
