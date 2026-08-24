@@ -291,8 +291,9 @@ let pollTimer: number | null = null
 let lastActiveTime = Date.now()
 const isPolling = ref(true)
 
-// Track which pending cleanup tasks have been "seen" with actual download subtasks
-const seenWithDownloads = new Set<string>()
+// Auto cleanup state: taskId -> first time detected as completed
+const pendingCleanupTimers = new Map<string, number>()
+const cleanedTasks = new Set<string>()
 
 // Detail dialog
 const detailVisible = ref(false)
@@ -379,7 +380,7 @@ function extractTempRoot(path: string): string | null {
   return m ? m[1] : null
 }
 
-// ==================== Hierarchy Resolution ====================
+// ==================== Hierarchy Resolution (for manual delete) ====================
 function resolveHierarchy(inputId: string) {
   const matchedTransfers: TransferTask[] = []
   const matchedFolders: FolderTask[] = []
@@ -499,7 +500,7 @@ function resolveHierarchy(inputId: string) {
   }
 }
 
-// ==================== Deep Delete ====================
+// ==================== Deep Delete (manual) ====================
 async function executeDeepDelete(inputId: string, deleteLocalFiles: boolean) {
   const tree = resolveHierarchy(inputId)
 
@@ -542,6 +543,57 @@ async function executeDeepDelete(inputId: string, deleteLocalFiles: boolean) {
   }
 }
 
+// ==================== Auto Cleanup (conservative) ====================
+async function executeAutoCleanup(taskId: string) {
+  // 1. Delete transfer record
+  await downloadApi.deleteTransfer(taskId)
+
+  // 2. Find related folders by transfer_id / source_id (strict, no path spreading)
+  const relatedFolders = folderTasks.value.filter(f =>
+    f.transfer_id === taskId || f.source_id === taskId
+  )
+  const relatedFolderIds = new Set(relatedFolders.map(f => f.id || f.folder_id || f.task_id || ''))
+
+  // 3. Find related files by group_id / folder_id / parent_task_id
+  const relatedFiles = fileTasks.value.filter(f =>
+    relatedFolderIds.has(f.group_id || '') ||
+    relatedFolderIds.has(f.folder_id || '') ||
+    relatedFolderIds.has(f.parent_task_id || '')
+  )
+
+  // 4. Collect netdisk temp paths
+  const paths = new Set<string>()
+  for (const f of relatedFolders) {
+    const p = f.path || f.folder_path || f.save_path || ''
+    if (p) {
+      paths.add(p)
+      const m = extractTempRoot(p)
+      if (m) paths.add(m)
+    }
+  }
+  for (const f of relatedFiles) {
+    const p = f.path || f.local_path || f.save_path || ''
+    if (p) {
+      paths.add(p)
+      const m = extractTempRoot(p)
+      if (m) paths.add(m)
+    }
+  }
+  if (paths.size > 0) {
+    await downloadApi.deleteNetdiskFiles(Array.from(paths))
+  }
+
+  // 5. Delete download records only (keep local files)
+  for (const f of relatedFolders) {
+    const fid = f.id || f.folder_id || f.task_id || ''
+    if (fid) await downloadApi.deleteFolderRecordOnly(fid)
+  }
+  for (const f of relatedFiles) {
+    const fid = f.id || f.task_id || ''
+    if (fid) await downloadApi.deleteFileRecordOnly(fid)
+  }
+}
+
 // ==================== Computed ====================
 const displayCards = computed((): DisplayCard[] => {
   const cards: DisplayCard[] = []
@@ -565,6 +617,8 @@ const displayCards = computed((): DisplayCard[] => {
       if (allDone) effStatus = 'completed'
       else if (anyActive) effStatus = 'active'
     }
+    // If folder status says completed but subs say otherwise, trust subs
+    // If subs empty and folder status is not completed, keep folder status
 
     const transfer = transferTasks.value.find(t => {
       if (folder.transfer_id) return t.id === folder.transfer_id
@@ -703,34 +757,71 @@ const checkAutoCleanup = async () => {
   if (pending.length === 0) return
 
   for (const taskId of pending) {
-    const tree = resolveHierarchy(taskId)
+    if (cleanedTasks.has(taskId)) continue
 
-    // Must have at least one download task (folder or file) before considering cleanup
-    // This prevents cleanup when transfer is created but download tasks haven't spawned yet
-    const hasDownloadTasks = tree.folders.length > 0 || tree.files.length > 0
-
-    if (!hasDownloadTasks) {
-      // Transfer may still be processing; wait for download tasks to appear
+    // 1. Find the transfer task
+    const transfer = transferTasks.value.find(t => t.id === taskId)
+    if (!transfer) {
+      // Transfer already gone (backend cleaned it up), remove from pending
+      removePendingAutoCleanup(taskId)
+      pendingCleanupTimers.delete(taskId)
       continue
     }
 
-    // Mark that we've seen this task with actual download subtasks
-    seenWithDownloads.add(taskId)
+    // 2. Transfer must be completed
+    const transferStatus = transfer.status?.toLowerCase() || ''
+    if (!['completed', 'done', 'finished', 'success'].includes(transferStatus)) {
+      pendingCleanupTimers.delete(taskId)
+      continue
+    }
 
-    // Check if all download tasks are completed
-    const allCompleted = tree.folders.every(f => {
-      const status = f.status?.toLowerCase() || ''
-      return ['completed', 'done', 'finished', 'success'].includes(status)
-    }) && tree.files.every(f => {
-      const status = f.status?.toLowerCase() || ''
-      return ['completed', 'done', 'finished', 'success'].includes(status)
+    // 3. Find related download tasks (strict: only by transfer_id/source_id, no path spreading)
+    const relatedFolders = folderTasks.value.filter(f =>
+      f.transfer_id === taskId || f.source_id === taskId
+    )
+    const relatedFolderIds = new Set(relatedFolders.map(f => f.id || f.folder_id || f.task_id || ''))
+    const relatedFiles = fileTasks.value.filter(f =>
+      relatedFolderIds.has(f.group_id || '') ||
+      relatedFolderIds.has(f.folder_id || '') ||
+      relatedFolderIds.has(f.parent_task_id || '')
+    )
+
+    // 4. Must have actual download tasks before considering cleanup
+    // This prevents cleanup when transfer is created but download tasks haven't spawned yet
+    if (relatedFolders.length === 0 && relatedFiles.length === 0) {
+      pendingCleanupTimers.delete(taskId)
+      continue
+    }
+
+    // 5. Check if all related download tasks are completed
+    const allFoldersDone = relatedFolders.every(f => {
+      const s = f.status?.toLowerCase() || ''
+      return ['completed', 'done', 'finished', 'success'].includes(s)
+    })
+    const allFilesDone = relatedFiles.every(f => {
+      const s = f.status?.toLowerCase() || ''
+      return ['completed', 'done', 'finished', 'success'].includes(s)
     })
 
-    if (allCompleted) {
-      await executeDeepDelete(taskId, false)
-      removePendingAutoCleanup(taskId)
-      seenWithDownloads.delete(taskId)
-      ElMessage.success(`任务 ${taskId.slice(0, 8)}... 已完成，网盘临时文件已自动清理`)
+    if (allFoldersDone && allFilesDone) {
+      const now = Date.now()
+      const firstSeen = pendingCleanupTimers.get(taskId)
+
+      if (!firstSeen) {
+        // First time detected as completed, start timer
+        pendingCleanupTimers.set(taskId, now)
+      } else if (now - firstSeen >= 15000) {
+        // Consistently completed for 15 seconds, execute cleanup
+        await executeAutoCleanup(taskId)
+        removePendingAutoCleanup(taskId)
+        pendingCleanupTimers.delete(taskId)
+        cleanedTasks.add(taskId)
+        ElMessage.success(`任务 ${taskId.slice(0, 8)}... 已完成，网盘临时文件已自动清理`)
+      }
+      // else: still within confirmation period, wait
+    } else {
+      // Tasks not all completed, reset timer
+      pendingCleanupTimers.delete(taskId)
     }
   }
 }
