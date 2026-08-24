@@ -72,6 +72,7 @@ export interface FolderTask {
   completed_files?: number
   speed?: number
   download_speed?: number
+  error?: string
   sub_tasks?: any[]
   files?: any[]
   task_ids?: string[]
@@ -99,6 +100,7 @@ export interface FileTask {
   speed?: number
   download_speed?: number
   progress?: number
+  error?: string
   group_id?: string
   folder_id?: string
   parent_task_id?: string

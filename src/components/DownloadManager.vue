@@ -105,6 +105,9 @@
                   </el-tag>
                 </div>
                 <div class="task-path">{{ card.path }}</div>
+                <div v-if="card.status === 'failed' && card.error" class="task-error" :title="card.error">
+                  {{ card.error }}
+                </div>
               </div>
               <div class="task-actions">
                 <el-button v-if="card.isFolder" size="small" plain type="info" @click="showDetail(card)">
@@ -316,6 +319,7 @@ interface DisplayCard {
   totalCount: number
   isFolder: boolean
   subFiles: FileTask[]
+  error?: string
   transferId?: string
   localPath?: string
   createdAt?: string
@@ -323,11 +327,12 @@ interface DisplayCard {
 
 // ==================== Helpers ====================
 function mapStatus(raw: string): TaskStatus {
-  const s = raw?.toLowerCase() || ''
-  if (['downloading', 'running', 'active', 'pending'].includes(s)) return 'active'
-  if (['paused', 'stopped', 'waiting'].includes(s)) return 'waiting'
-  if (['completed', 'done', 'finished', 'success'].includes(s)) return 'completed'
-  if (['failed', 'error', 'cancelled'].includes(s)) return 'failed'
+  const s = (raw || '').toLowerCase()
+  // 失败/错误/取消：优先识别，避免把 download_failed / transfer_failed / error 等误判为下载中
+  if (s.includes('fail') || s.includes('error') || s.includes('cancel') || s === 'aborted') return 'failed'
+  if (s.includes('download') || s.includes('running') || s.includes('active') || s === 'pending' || s.includes('decrypt') || s.includes('scan')) return 'active'
+  if (s.includes('pause') || s.includes('stop') || s.includes('wait') || s.includes('queue') || s === 'transferred') return 'waiting'
+  if (s.includes('complete') || s.includes('done') || s.includes('finish') || s.includes('success')) return 'completed'
   return 'waiting'
 }
 
@@ -488,14 +493,21 @@ function buildCards(): DisplayCard[] {
     let effStatus = mapStatus(folder.status)
     if (subs.length > 0) {
       const allDone = subs.every(f => ['completed', 'done', 'finished'].includes(f.status))
-      const anyActive = subs.some(f => ['downloading', 'running'].includes(f.status))
-      const folderIsActive = ['downloading', 'running', 'active', 'pending'].includes((folder.status || '').toLowerCase())
-      if (allDone && folderIsActive && !anyActive) {
-        // 后端文件夹仍显示"下载中"但子文件已全部完成（疑似后端卡住/未完成最终化）：
-        // 不再误报"已完成"，保持真实的后端状态，并在顶部提示
-        effStatus = 'active'
-      } else if (allDone) {
+      const anyActive = subs.some(f => mapStatus(f.status) === 'active')
+      const anyFailed = subs.some(f => mapStatus(f.status) === 'failed')
+      const folderRaw = (folder.status || '').toLowerCase()
+      const folderIsActive = folderRaw.includes('download') || folderRaw.includes('running') || folderRaw.includes('active') || folderRaw === 'pending' || folderRaw.includes('decrypt') || folderRaw.includes('scan')
+      const folderIsFailed = folderRaw.includes('fail') || folderRaw.includes('error') || folderRaw.includes('cancel')
+      if (folderIsFailed) {
+        effStatus = 'failed'
+      } else if (allDone && !anyActive && !anyFailed) {
         effStatus = 'completed'
+      } else if (allDone && anyFailed && !anyActive) {
+        // 全部收尾但存在失败子文件 → 标记失败
+        effStatus = 'failed'
+      } else if (!anyActive && anyFailed) {
+        // 没有子文件在下载但有失败 → 标记失败
+        effStatus = 'failed'
       } else if (anyActive) {
         effStatus = 'active'
       }
@@ -506,6 +518,13 @@ function buildCards(): DisplayCard[] {
       if (folder.source_id) return t.id === folder.source_id
       return false
     })
+
+    // 失败时的错误信息（后端 error 字段或首个失败子文件的错误）
+    let errMsg = folder.error || ''
+    if (!errMsg && effStatus === 'failed') {
+      const failedSub = subs.find(f => mapStatus(f.status) === 'failed' && f.error)
+      if (failedSub) errMsg = (failedSub as any).error || ''
+    }
 
     cards.push({
       id: folder.id,
@@ -521,6 +540,7 @@ function buildCards(): DisplayCard[] {
       totalCount,
       isFolder: true,
       subFiles: subs,
+      error: errMsg,
       transferId: transfer?.id,
       localPath: folder.save_path || folder.path,
       createdAt: folder.created_at,
@@ -550,6 +570,7 @@ function buildCards(): DisplayCard[] {
       totalCount: 1,
       isFolder: false,
       subFiles: [],
+      error: file.error || '',
       localPath: file.local_path || file.save_path,
       createdAt: file.created_at,
     })
@@ -877,6 +898,13 @@ onUnmounted(() => {
   color: #909399;
   margin-top: 4px;
   word-break: break-all;
+}
+.task-error {
+  font-size: 12px;
+  color: #f56c6c;
+  margin-top: 4px;
+  word-break: break-all;
+  line-height: 1.5;
 }
 .task-actions {
   display: flex;
