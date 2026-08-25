@@ -450,27 +450,24 @@ function resolveHierarchy(inputId: string) {
 }
 
 /**
- * 彻底删除任务（类似 test_baidupcs_api_v7.py --action delete）：
- * 销毁文件夹卡片 / 子文件下载流 / 转存记录 / 网盘临时目录
+ * 彻底删除任务：
+ * 销毁文件夹卡片（含本地文件）/ 子文件下载流 / 网盘临时目录 .bpr_share_temp/{id}。
+ * 注意：不删除「转存管理」记录（按需求，转存记录任何时候都不自动删除）
  */
 async function deleteCardLikeScript(inputId: string) {
-  const { folders, files, transfers, savePaths } = resolveHierarchy(inputId)
+  const { folders, files, tempRoots } = resolveHierarchy(inputId)
 
   // 1. 先暂停
   for (const fid of folders) await downloadApi.pauseFolder(fid)
   for (const did of files) await downloadApi.pauseFile(did)
   await sleep(500)
 
-  // 2. 销毁文件夹任务卡片（同时删除本地文件，同 python 脚本）
+  // 2. 销毁文件夹任务卡片（同时删除本地文件）
   for (const fid of folders) await downloadApi.deleteFolder(fid)
   // 3. 销毁子文件下载流
   for (const did of files) await downloadApi.deleteFile(did)
-  // 4. 销毁转存记录：解析出的全部 + 直接按 inputId 兜底（同 python 脚本）
-  const transferIds = new Set<string>(transfers)
-  if (inputId) transferIds.add(inputId)
-  for (const tid of transferIds) await downloadApi.deleteTransfer(tid)
-  // 5. 清理网盘临时目录（含原始路径与临时根目录）
-  if (savePaths.length) await downloadApi.deleteNetdiskFiles(savePaths)
+  // 4. 清理网盘临时目录 .bpr_share_temp/{id}
+  if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
 }
 
 function showBatchDeleteConfirm(cards: DisplayCard[]) {
@@ -705,9 +702,9 @@ const handleAutoDelete = async () => {
   let cleaned = false
   try {
     for (const taskId of ids) {
-      const { folders, files, transfers, savePaths } = resolveHierarchy(taskId)
+      const { folders, files, tempRoots } = resolveHierarchy(taskId)
       // 必须「所有」关联的文件夹与文件都下载完成才清理，
-      // 防止下载还没完成（仅个别文件完成）就删掉 .bpr_share_temp 和转存记录导致下载失败
+      // 防止下载还没完成（仅个别文件完成）就删掉 .bpr_share_temp 导致下载失败
       const foldersAllDone = folders.length > 0 && folders.every(fid => {
         const f = folderTasks.value.find(x => x.id === fid)
         return f && ['completed', 'done', 'finished'].includes(f.status)
@@ -718,16 +715,8 @@ const handleAutoDelete = async () => {
       })
       const allComplete = (folders.length === 0 || foldersAllDone) && (files.length === 0 || filesAllDone)
       if (allComplete && (folders.length > 0 || files.length > 0)) {
-        // 收集转存记录 ID（同时通过 taskId 与文件夹的 transfer_id/source_id 关联兜底）
-        const transferIds = new Set(transfers)
-        if (taskId) transferIds.add(taskId)
-        for (const fid of folders) {
-          const f = folderTasks.value.find(x => x.id === fid)
-          if (f?.transfer_id) transferIds.add(f.transfer_id)
-          if (f?.source_id) transferIds.add(f.source_id)
-        }
-        for (const tid of transferIds) await downloadApi.deleteTransfer(tid)
-        if (savePaths.length) await downloadApi.deleteNetdiskFiles(savePaths)
+        // 只删除网盘临时目录 .bpr_share_temp/{id}；不删除转存管理记录、不删除下载管理记录
+        if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
         takeAutoDelete(taskId)
         cleaned = true
       }
