@@ -706,15 +706,18 @@ const handleAutoDelete = async () => {
   try {
     for (const taskId of ids) {
       const { folders, files, transfers, savePaths } = resolveHierarchy(taskId)
-      const anyDone = folders.some(fid => {
+      // 必须「所有」关联的文件夹与文件都下载完成才清理，
+      // 防止下载还没完成（仅个别文件完成）就删掉 .bpr_share_temp 和转存记录导致下载失败
+      const foldersAllDone = folders.length > 0 && folders.every(fid => {
         const f = folderTasks.value.find(x => x.id === fid)
         return f && ['completed', 'done', 'finished'].includes(f.status)
       })
-      const fileDone = files.some(did => {
+      const filesAllDone = files.length > 0 && files.every(did => {
         const d = fileTasks.value.find(x => x.id === did)
         return d && ['completed', 'done', 'finished'].includes(d.status)
       })
-      if (anyDone || fileDone) {
+      const allComplete = (folders.length === 0 || foldersAllDone) && (files.length === 0 || filesAllDone)
+      if (allComplete && (folders.length > 0 || files.length > 0)) {
         // 收集转存记录 ID（同时通过 taskId 与文件夹的 transfer_id/source_id 关联兜底）
         const transferIds = new Set(transfers)
         if (taskId) transferIds.add(taskId)
