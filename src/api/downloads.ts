@@ -310,13 +310,24 @@ export const downloadApi = {
   // --- Netdisk Cleanup ---
   async deleteNetdiskFiles(paths: string[]): Promise<boolean> {
     if (!paths.length) return false
-    const payloads = [{ paths }, { path: paths[0] }, { filelist: paths }]
-    const endpoints = ['/files/delete', '/file/delete']
-    for (const ep of endpoints) {
-      for (const payload of payloads) {
-        try { await getClient().post(ep, payload); return true } catch { continue }
+    let anyOk = false
+    // 同 python 脚本：对每个路径，尝试多种 Payload 与多个端点，确保网盘文件物理删除
+    for (const p of paths) {
+      if (!p || p.length < 3) continue
+      const payloads = [{ paths: [p] }, { path: p }, { filelist: [p] }]
+      let deleted = false
+      for (const ep of ['/files/delete', '/file/delete']) {
+        for (const payload of payloads) {
+          try {
+            await getClient().post(ep, payload)
+            deleted = true
+            break
+          } catch { continue }
+        }
+        if (deleted) break
       }
+      if (deleted) anyOk = true
     }
-    return false
+    return anyOk
   }
 }

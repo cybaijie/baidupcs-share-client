@@ -384,16 +384,27 @@ function resolveHierarchy(inputId: string) {
   const fSet = new Set<string>()
   const dSet = new Set<string>()
   const rawPaths = new Set<string>()
-  const dirPath = (t: any) => (t && typeof t === 'object' ? (t.path || t.save_path || t.local_path || t.folder_path || '') : '') || ''
+
+  // 与 test_baidupcs_api_v7.py 的 _extract_path 一致，覆盖更多路径字段
+  const PATH_KEYS = ['server_path', 'remote_path', 'path', 'dir', 'folder_path', 'target_dir',
+    'source_path', 'remote_dir', 'save_path', 'local_path', 'save_dir', 'remote_root', 'local_root']
+  const dirPath = (t: any): string => {
+    if (!t || typeof t !== 'object') return ''
+    for (const k of PATH_KEYS) {
+      const v = t[k]
+      if (v && typeof v === 'string' && v.trim()) return v.trim()
+    }
+    return ''
+  }
 
   for (const t of transferTasks.value) {
     if (t.id === inputId) { tSet.add(t.id); const p = dirPath(t); if (p) rawPaths.add(p) }
   }
   for (const f of folderTasks.value) {
-    if (f.id === inputId) { fSet.add(f.id); const p = f.path || ''; if (p) rawPaths.add(p) }
+    if (f.id === inputId) { fSet.add(f.id); const p = dirPath(f); if (p) rawPaths.add(p) }
   }
   for (const f of fileTasks.value) {
-    if (f.id === inputId) { dSet.add(f.id); const p = f.path || f.local_path || f.save_path || ''; if (p) rawPaths.add(p) }
+    if (f.id === inputId) { dSet.add(f.id); const p = dirPath(f); if (p) rawPaths.add(p) }
   }
 
   // 提取网盘临时根目录 /.bpr_share_temp/<UUID>
@@ -403,8 +414,8 @@ function resolveHierarchy(inputId: string) {
   // 依据 tempRoots 扩散关联
   for (const root of tempRoots) {
     for (const t of transferTasks.value) if (dirPath(t).includes(root)) tSet.add(t.id)
-    for (const f of folderTasks.value) if ((f.path || '').includes(root)) fSet.add(f.id)
-    for (const f of fileTasks.value) if ((f.path || f.local_path || f.save_path || '').includes(root)) dSet.add(f.id)
+    for (const f of folderTasks.value) if (dirPath(f).includes(root)) fSet.add(f.id)
+    for (const f of fileTasks.value) if (dirPath(f).includes(root)) dSet.add(f.id)
   }
 
   // 展开 folder 关联的子文件
@@ -426,11 +437,15 @@ function resolveHierarchy(inputId: string) {
     }
   }
 
+  // save_paths = 原始路径 ∪ 临时根目录（同 python 脚本）
+  const savePaths = [...rawPaths, ...tempRoots]
+
   return {
     transfers: [...tSet],
     folders: [...fSet],
     files: [...dSet],
     tempRoots: [...tempRoots],
+    savePaths,
   }
 }
 
@@ -439,7 +454,7 @@ function resolveHierarchy(inputId: string) {
  * 销毁文件夹卡片 / 子文件下载流 / 转存记录 / 网盘临时目录
  */
 async function deleteCardLikeScript(inputId: string) {
-  const { folders, files, transfers, tempRoots } = resolveHierarchy(inputId)
+  const { folders, files, transfers, savePaths } = resolveHierarchy(inputId)
 
   // 1. 先暂停
   for (const fid of folders) await downloadApi.pauseFolder(fid)
@@ -450,10 +465,12 @@ async function deleteCardLikeScript(inputId: string) {
   for (const fid of folders) await downloadApi.deleteFolder(fid)
   // 3. 销毁子文件下载流
   for (const did of files) await downloadApi.deleteFile(did)
-  // 4. 销毁转存记录
-  for (const tid of transfers) await downloadApi.deleteTransfer(tid)
-  // 5. 清理网盘临时目录
-  if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
+  // 4. 销毁转存记录：解析出的全部 + 直接按 inputId 兜底（同 python 脚本）
+  const transferIds = new Set<string>(transfers)
+  if (inputId) transferIds.add(inputId)
+  for (const tid of transferIds) await downloadApi.deleteTransfer(tid)
+  // 5. 清理网盘临时目录（含原始路径与临时根目录）
+  if (savePaths.length) await downloadApi.deleteNetdiskFiles(savePaths)
 }
 
 function showBatchDeleteConfirm(cards: DisplayCard[]) {
@@ -688,7 +705,7 @@ const handleAutoDelete = async () => {
   let cleaned = false
   try {
     for (const taskId of ids) {
-      const { folders, files, transfers, tempRoots } = resolveHierarchy(taskId)
+      const { folders, files, transfers, savePaths } = resolveHierarchy(taskId)
       const anyDone = folders.some(fid => {
         const f = folderTasks.value.find(x => x.id === fid)
         return f && ['completed', 'done', 'finished'].includes(f.status)
@@ -707,7 +724,7 @@ const handleAutoDelete = async () => {
           if (f?.source_id) transferIds.add(f.source_id)
         }
         for (const tid of transferIds) await downloadApi.deleteTransfer(tid)
-        if (tempRoots.length) await downloadApi.deleteNetdiskFiles(tempRoots)
+        if (savePaths.length) await downloadApi.deleteNetdiskFiles(savePaths)
         takeAutoDelete(taskId)
         cleaned = true
       }
